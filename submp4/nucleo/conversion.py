@@ -276,12 +276,22 @@ def _cargar_subtitulo(texto: str, ruta: Path, fps: float | None) -> tuple[pysubs
         raise ErrorConversion(f"No se pudo leer el subtítulo: {error}") from None
 
 
-def convertir_a_srt(
-    ruta_entrada: Path, ruta_salida: Path | None = None, fps: float | None = None
-) -> ResultadoConversion:
-    """Convierte un subtítulo a SRT limpio en UTF-8 y lo guarda en un archivo nuevo.
+@dataclass(frozen=True)
+class LecturaSubtitulo:
+    """Lo que se obtiene al leer y limpiar un subtítulo, antes de guardarlo."""
 
-    ruta_salida: si no se indica, se calcula con ruta_srt_disponible().
+    lineas: list[Linea]  # Ya limpias y sin superposiciones
+    formato: str
+    codificacion: str
+    lineas_leidas: int
+    efectos_quitados: int
+
+
+def leer_lineas(ruta_entrada: Path, fps: float | None = None) -> LecturaSubtitulo:
+    """Lee cualquier subtítulo y devuelve sus líneas limpias, listas para SRT.
+
+    La usan tanto la conversión como la sincronización, así cualquier
+    formato se puede sincronizar directamente.
     fps: solo para formatos por cuadros (MicroDVD .sub) sin FPS en el archivo.
     """
     ruta_entrada = Path(ruta_entrada)
@@ -310,19 +320,40 @@ def convertir_a_srt(
         if texto_srt:
             lineas.append(Linea(evento.start, evento.end, texto_srt))
 
-    finales = aplanar_superposiciones(lineas)
+    return LecturaSubtitulo(
+        lineas=aplanar_superposiciones(lineas),
+        formato=formato,
+        codificacion=codificacion,
+        lineas_leidas=leidas,
+        efectos_quitados=efectos,
+    )
 
-    salida = Path(ruta_salida) if ruta_salida else ruta_srt_disponible(ruta_entrada)
-    if salida.resolve() == ruta_entrada.resolve():
+
+def guardar_srt(lineas: list[Linea], ruta_salida: Path, ruta_original: Path) -> None:
+    """Guarda las líneas como SRT en UTF-8, sin pisar nunca el original."""
+    if Path(ruta_salida).resolve() == Path(ruta_original).resolve():
         raise ErrorConversion("La salida no puede ser el mismo archivo original.")
     # newline="\r\n": saltos de línea de Windows, los más compatibles en SRT.
-    salida.write_text(generar_srt(finales), encoding="utf-8", newline="\r\n")
+    Path(ruta_salida).write_text(generar_srt(lineas), encoding="utf-8", newline="\r\n")
+
+
+def convertir_a_srt(
+    ruta_entrada: Path, ruta_salida: Path | None = None, fps: float | None = None
+) -> ResultadoConversion:
+    """Convierte un subtítulo a SRT limpio en UTF-8 y lo guarda en un archivo nuevo.
+
+    ruta_salida: si no se indica, se calcula con ruta_srt_disponible().
+    fps: solo para formatos por cuadros (MicroDVD .sub) sin FPS en el archivo.
+    """
+    lectura = leer_lineas(ruta_entrada, fps)
+    salida = Path(ruta_salida) if ruta_salida else ruta_srt_disponible(ruta_entrada)
+    guardar_srt(lectura.lineas, salida, ruta_entrada)
 
     return ResultadoConversion(
         ruta_salida=salida,
-        formato_origen=formato,
-        codificacion_origen=codificacion,
-        lineas_leidas=leidas,
-        efectos_quitados=efectos,
-        lineas_guardadas=len(finales),
+        formato_origen=lectura.formato,
+        codificacion_origen=lectura.codificacion,
+        lineas_leidas=lectura.lineas_leidas,
+        efectos_quitados=lectura.efectos_quitados,
+        lineas_guardadas=len(lectura.lineas),
     )

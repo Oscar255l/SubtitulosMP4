@@ -69,6 +69,11 @@ escritorio que:
   milisegundos (`00:01:23,500`).
 - **RF-09** Las líneas que queden con tiempo negativo se recortan a 0 o se
   eliminan si terminan antes de 0.
+- **RF-09a** Se puede sincronizar cualquier formato soportado; el resultado se
+  guarda siempre como SRT limpio en `Nombre.sync.srt`.
+- **RF-09b** Al elegir el archivo, la app muestra la primera y la última línea
+  con sus tiempos y llena los campos "en el subtítulo"; el usuario solo escribe
+  cuándo se dicen en el video. Hay vista previa antes de aplicar.
 
 ### Unión al video (fase 3)
 
@@ -118,6 +123,6 @@ escritorio que:
 |---|---|---|
 | 0 | Estructura, requisitos, ventana esqueleto, utilidades de tiempo y codificación | ✅ Hecho |
 | 1 | Conversión a SRT con limpieza de ASS (RF-01 a RF-04) | ✅ Hecho |
-| 2 | Sincronización (RF-05 a RF-09) | ⏳ Pendiente |
+| 2 | Sincronización (RF-05 a RF-09) | ✅ Hecho |
 | 3 | Unión al MP4 con FFmpeg (RF-10 a RF-13) | ⏳ Pendiente |
 | 4 | Extras (bilingüe, extraer pistas, arrastrar y soltar) | ⏳ Pendiente |

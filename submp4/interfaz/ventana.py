@@ -1,16 +1,29 @@
 """Ventana principal de la app, hecha con CustomTkinter (RF-14 a RF-16).
 
-Estado: la pestaña Convertir ya funciona (fase 1). En Sincronizar ya se
-calcula el desplazamiento por un punto; "Aplicar" y "Unir" se conectan en
-las fases 2 y 3.
+Estado: Convertir (fase 1) y Sincronizar (fase 2) ya funcionan.
+"Unir al video" se conecta en la fase 3.
 """
 
+import re
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
-from submp4.nucleo.conversion import FORMATOS_ENTRADA, ErrorConversion, convertir_a_srt
-from submp4.nucleo.sincronizacion import desplazamiento_por_punto
+from submp4.nucleo.conversion import (
+    FORMATOS_ENTRADA,
+    ErrorConversion,
+    LecturaSubtitulo,
+    convertir_a_srt,
+    leer_lineas,
+)
+from submp4.nucleo.sincronizacion import (
+    AjusteLineal,
+    ajuste_por_dos_puntos,
+    ajuste_por_punto,
+    ajuste_por_segundos,
+    describir_ajuste,
+    sincronizar_archivo,
+)
 from submp4.nucleo.tiempo import ms_a_texto
 from submp4.nucleo.unir_video import buscar_ffmpeg
 
@@ -22,13 +35,22 @@ _TIPOS_SUBTITULO = [
 _TIPOS_SRT = [("SubRip", "*.srt")]
 _TIPOS_VIDEO = [("Video MP4", "*.mp4")]
 
+# Nombres de los tres modos de sincronización.
+_MODO_SEGUNDOS = "Por segundos"
+_MODO_PUNTO = "Por un punto"
+_MODO_DOS_PUNTOS = "Por dos puntos"
+
 
 class SelectorArchivo(ctk.CTkFrame):
-    """Una fila con: etiqueta, caja de texto con la ruta y botón "Buscar…"."""
+    """Una fila con: etiqueta, caja de texto con la ruta y botón "Buscar…".
 
-    def __init__(self, padre, texto: str, tipos: list[tuple[str, str]]):
+    al_elegir: función opcional que se llama cuando se elige un archivo.
+    """
+
+    def __init__(self, padre, texto: str, tipos: list[tuple[str, str]], al_elegir=None):
         super().__init__(padre, fg_color="transparent")
         self._tipos = tipos
+        self._al_elegir = al_elegir
 
         ctk.CTkLabel(self, text=texto, width=110, anchor="w").pack(side="left")
         self.entrada = ctk.CTkEntry(self, placeholder_text="Ningún archivo seleccionado")
@@ -38,12 +60,29 @@ class SelectorArchivo(ctk.CTkFrame):
     def _buscar(self) -> None:
         ruta = filedialog.askopenfilename(filetypes=self._tipos)
         if ruta:  # Si el usuario cancela, ruta es una cadena vacía.
-            self.entrada.delete(0, "end")
-            self.entrada.insert(0, ruta)
+            self.poner_ruta(ruta)
+
+    def poner_ruta(self, ruta) -> None:
+        """Escribe la ruta en la caja y avisa con al_elegir."""
+        _poner_texto(self.entrada, str(ruta))
+        if self._al_elegir:
+            self._al_elegir(str(ruta))
 
     @property
     def ruta(self) -> str:
         return self.entrada.get().strip()
+
+
+def _poner_texto(entrada, texto: str) -> None:
+    """Reemplaza el contenido de una caja de texto."""
+    entrada.delete(0, "end")
+    entrada.insert(0, texto)
+
+
+def _resumen_linea(texto: str, largo: int = 45) -> str:
+    """Texto corto de una línea para mostrar: sin etiquetas y en un renglón."""
+    plano = re.sub(r"</?[ibu]>", "", texto).replace("\n", " / ")
+    return plano if len(plano) <= largo else plano[: largo - 1] + "…"
 
 
 def _proximamente(fase: int) -> None:
@@ -54,8 +93,12 @@ class VentanaPrincipal(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("SubtitulosMP4")
-        self.geometry("760x470")
-        self.minsize(640, 440)
+        self.geometry("780x540")
+        self.minsize(660, 500)
+
+        # Subtítulo leído en la pestaña Sincronizar (para vista previa).
+        self._sinc_lectura: LecturaSubtitulo | None = None
+        self._sinc_ruta_leida = ""
 
         pestañas = ctk.CTkTabview(self)
         pestañas.pack(fill="both", expand=True, padx=12, pady=(12, 0))
@@ -65,7 +108,9 @@ class VentanaPrincipal(ctk.CTk):
         self._crear_pestaña_unir(pestañas.add("Unir al video"))
         self._crear_barra_estado()
 
-    # ---------- Pestaña 1: Convertir (fase 1) ----------
+    # ======================================================================
+    # Pestaña 1: Convertir (fase 1)
+    # ======================================================================
     def _crear_pestaña_convertir(self, pestaña) -> None:
         ctk.CTkLabel(
             pestaña,
@@ -119,51 +164,208 @@ class VentanaPrincipal(ctk.CTk):
             )
         )
         # Dejar el SRT nuevo listo en las otras pestañas.
-        for selector in (self.sinc_entrada, self.unir_sub):
-            selector.entrada.delete(0, "end")
-            selector.entrada.insert(0, str(resultado.ruta_salida))
+        self.sinc_entrada.poner_ruta(resultado.ruta_salida)
+        self.unir_sub.poner_ruta(resultado.ruta_salida)
 
-    # ---------- Pestaña 2: Sincronizar (fase 2) ----------
+    # ======================================================================
+    # Pestaña 2: Sincronizar (fase 2)
+    # ======================================================================
     def _crear_pestaña_sincronizar(self, pestaña) -> None:
-        self.sinc_entrada = SelectorArchivo(pestaña, "Subtítulo SRT:", _TIPOS_SRT)
-        self.sinc_entrada.pack(fill="x", pady=(8, 12))
+        self.sinc_entrada = SelectorArchivo(
+            pestaña, "Subtítulo:", _TIPOS_SUBTITULO, al_elegir=self._leer_para_sincronizar
+        )
+        self.sinc_entrada.pack(fill="x", pady=(8, 4))
 
-        fila = ctk.CTkFrame(pestaña, fg_color="transparent")
-        fila.pack(fill="x", pady=4)
-        ctk.CTkLabel(fila, text="El subtítulo empieza en:").grid(row=0, column=0, sticky="w")
-        self.sinc_sub = ctk.CTkEntry(fila, width=120, placeholder_text="00:00:06")
-        self.sinc_sub.grid(row=0, column=1, padx=8, pady=4)
-        ctk.CTkLabel(fila, text="Empiezan a hablar en:").grid(row=1, column=0, sticky="w")
-        self.sinc_real = ctk.CTkEntry(fila, width=120, placeholder_text="00:01:23")
-        self.sinc_real.grid(row=1, column=1, padx=8, pady=4)
+        # Primera y última línea del archivo, para saber qué buscar en el video.
+        self.sinc_info = ctk.CTkLabel(pestaña, text="", justify="left", text_color="gray")
+        self.sinc_info.pack(anchor="w", pady=(0, 8))
+
+        self.sinc_modo = ctk.CTkSegmentedButton(
+            pestaña,
+            values=[_MODO_SEGUNDOS, _MODO_PUNTO, _MODO_DOS_PUNTOS],
+            command=self._mostrar_modo,
+        )
+        self.sinc_modo.pack(pady=4)
+
+        # Un panel por modo; solo se ve el del modo elegido.
+        contenedor = ctk.CTkFrame(pestaña, fg_color="transparent")
+        contenedor.pack(fill="x", pady=8)
+        self._paneles = {
+            _MODO_SEGUNDOS: self._crear_panel_segundos(contenedor),
+            _MODO_PUNTO: self._crear_panel_punto(contenedor),
+            _MODO_DOS_PUNTOS: self._crear_panel_dos_puntos(contenedor),
+        }
 
         botones = ctk.CTkFrame(pestaña, fg_color="transparent")
-        botones.pack(pady=12)
-        ctk.CTkButton(botones, text="Calcular", command=self._calcular).pack(side="left", padx=6)
-        ctk.CTkButton(
-            botones, text="Aplicar al archivo", command=lambda: _proximamente(2)
-        ).pack(side="left", padx=6)
+        botones.pack(pady=8)
+        ctk.CTkButton(botones, text="Vista previa", command=self._vista_previa).pack(
+            side="left", padx=6
+        )
+        ctk.CTkButton(botones, text="Aplicar al archivo", command=self._sincronizar).pack(
+            side="left", padx=6
+        )
 
-        self.sinc_resultado = ctk.CTkLabel(pestaña, text="")
-        self.sinc_resultado.pack()
+        self.sinc_resultado = ctk.CTkLabel(pestaña, text="", justify="left")
+        self.sinc_resultado.pack(anchor="w")
 
-    def _calcular(self) -> None:
-        """Muestra cuánto hay que mover el subtítulo. Esto ya funciona."""
+        self.sinc_modo.set(_MODO_PUNTO)
+        self._mostrar_modo(_MODO_PUNTO)
+
+    def _crear_panel_segundos(self, padre):
+        panel = ctk.CTkFrame(padre, fg_color="transparent")
+        ctk.CTkLabel(panel, text="Mover (segundos):").grid(row=0, column=0, sticky="w")
+        self.sinc_segundos = ctk.CTkEntry(panel, width=120, placeholder_text="+2.5 o -1,5")
+        self.sinc_segundos.grid(row=0, column=1, padx=8, pady=4)
+        ctk.CTkLabel(
+            panel,
+            text="Positivo: aparece más tarde · Negativo: aparece antes",
+            text_color="gray",
+        ).grid(row=1, column=0, columnspan=2, sticky="w")
+        return panel
+
+    def _crear_panel_punto(self, padre):
+        panel = ctk.CTkFrame(padre, fg_color="transparent")
+        ctk.CTkLabel(panel, text="El subtítulo empieza en:").grid(row=0, column=0, sticky="w")
+        self.sinc_sub = ctk.CTkEntry(panel, width=120, placeholder_text="00:00:06")
+        self.sinc_sub.grid(row=0, column=1, padx=8, pady=4)
+        ctk.CTkLabel(panel, text="Empiezan a hablar en:").grid(row=1, column=0, sticky="w")
+        self.sinc_real = ctk.CTkEntry(panel, width=120, placeholder_text="00:01:23")
+        self.sinc_real.grid(row=1, column=1, padx=8, pady=4)
+        return panel
+
+    def _crear_panel_dos_puntos(self, padre):
+        panel = ctk.CTkFrame(padre, fg_color="transparent")
+        ctk.CTkLabel(panel, text="En el subtítulo").grid(row=0, column=1)
+        ctk.CTkLabel(panel, text="En el video").grid(row=0, column=2)
+
+        ctk.CTkLabel(panel, text="Primera línea:").grid(row=1, column=0, sticky="w")
+        self.sinc_sub_1 = ctk.CTkEntry(panel, width=120, placeholder_text="00:00:06")
+        self.sinc_sub_1.grid(row=1, column=1, padx=8, pady=4)
+        self.sinc_real_1 = ctk.CTkEntry(panel, width=120, placeholder_text="00:01:23")
+        self.sinc_real_1.grid(row=1, column=2, padx=8, pady=4)
+
+        ctk.CTkLabel(panel, text="Última línea:").grid(row=2, column=0, sticky="w")
+        self.sinc_sub_2 = ctk.CTkEntry(panel, width=120, placeholder_text="00:42:10")
+        self.sinc_sub_2.grid(row=2, column=1, padx=8, pady=4)
+        self.sinc_real_2 = ctk.CTkEntry(panel, width=120, placeholder_text="00:43:55")
+        self.sinc_real_2.grid(row=2, column=2, padx=8, pady=4)
+        return panel
+
+    def _mostrar_modo(self, modo: str) -> None:
+        """Muestra solo el panel del modo elegido."""
+        for nombre, panel in self._paneles.items():
+            if nombre == modo:
+                panel.pack(anchor="w")
+            else:
+                panel.pack_forget()
+        self.sinc_resultado.configure(text="")
+
+    def _leer_para_sincronizar(self, ruta: str) -> bool:
+        """Lee el subtítulo, muestra su primera y última línea y llena los tiempos.
+
+        Devuelve True si se pudo leer.
+        """
+        self._sinc_lectura = None
         try:
-            ms = desplazamiento_por_punto(self.sinc_sub.get(), self.sinc_real.get())
+            lectura = leer_lineas(ruta)
+        except ErrorConversion as error:
+            # Los .sub necesitan FPS: esos se ingresan en la pestaña Convertir.
+            consejo = " Conviértelo primero en la pestaña Convertir." if "FPS" in str(error) else ""
+            self.sinc_info.configure(text=f"⚠ {error}{consejo}")
+            return False
+        except OSError as error:
+            self.sinc_info.configure(text=f"⚠ No se pudo leer el archivo: {error}")
+            return False
+
+        if not lectura.lineas:
+            self.sinc_info.configure(text="⚠ El archivo no tiene líneas de diálogo.")
+            return False
+
+        self._sinc_lectura = lectura
+        self._sinc_ruta_leida = ruta
+        primera, ultima = lectura.lineas[0], lectura.lineas[-1]
+        self.sinc_info.configure(
+            text=(
+                f"Primera línea ({ms_a_texto(primera.inicio)}): {_resumen_linea(primera.texto)}\n"
+                f"Última línea ({ms_a_texto(ultima.inicio)}): {_resumen_linea(ultima.texto)}"
+            )
+        )
+        # Llenar los tiempos "en el subtítulo"; solo falta escribir los del video.
+        _poner_texto(self.sinc_sub, ms_a_texto(primera.inicio))
+        _poner_texto(self.sinc_sub_1, ms_a_texto(primera.inicio))
+        _poner_texto(self.sinc_sub_2, ms_a_texto(ultima.inicio))
+        return True
+
+    def _ajuste_elegido(self) -> AjusteLineal:
+        """Calcula el ajuste según el modo elegido. Lanza ValueError si falta algo."""
+        modo = self.sinc_modo.get()
+        if modo == _MODO_SEGUNDOS:
+            return ajuste_por_segundos(self.sinc_segundos.get())
+        if modo == _MODO_PUNTO:
+            return ajuste_por_punto(self.sinc_sub.get(), self.sinc_real.get())
+        return ajuste_por_dos_puntos(
+            self.sinc_sub_1.get(), self.sinc_real_1.get(),
+            self.sinc_sub_2.get(), self.sinc_real_2.get(),
+        )
+
+    def _vista_previa(self) -> None:
+        """Explica el ajuste y muestra cómo quedarían la primera y la última línea."""
+        try:
+            ajuste = self._ajuste_elegido()
         except ValueError as error:
             self.sinc_resultado.configure(text=f"⚠ {error}")
             return
 
-        if ms > 0:
-            texto = f"Hay que ATRASAR el subtítulo {ms_a_texto(ms)}"
-        elif ms < 0:
-            texto = f"Hay que ADELANTAR el subtítulo {ms_a_texto(-ms)}"
-        else:
-            texto = "El subtítulo ya está sincronizado."
+        texto = describir_ajuste(ajuste)
+        ruta = self.sinc_entrada.ruta
+        if ruta and ruta != self._sinc_ruta_leida:
+            self._leer_para_sincronizar(ruta)  # La ruta se escribió a mano
+        if self._sinc_lectura and not ajuste.sin_cambios:
+            primera, ultima = self._sinc_lectura.lineas[0], self._sinc_lectura.lineas[-1]
+            texto += (
+                f"\nPrimera línea: {ms_a_texto(primera.inicio)} → "
+                f"{ms_a_texto(max(0, ajuste.aplicar(primera.inicio)))}"
+                f"\nÚltima línea: {ms_a_texto(ultima.inicio)} → "
+                f"{ms_a_texto(max(0, ajuste.aplicar(ultima.inicio)))}"
+            )
         self.sinc_resultado.configure(text=texto)
 
-    # ---------- Pestaña 3: Unir al video (fase 3) ----------
+    def _sincronizar(self) -> None:
+        """Aplica el ajuste al archivo y guarda un SRT nuevo."""
+        ruta = self.sinc_entrada.ruta
+        if not ruta:
+            self.sinc_resultado.configure(text="⚠ Primero elige un subtítulo con «Buscar…».")
+            return
+        try:
+            ajuste = self._ajuste_elegido()
+        except ValueError as error:
+            self.sinc_resultado.configure(text=f"⚠ {error}")
+            return
+        if ajuste.sin_cambios:
+            self.sinc_resultado.configure(text="El ajuste no mueve nada; no se creó ningún archivo.")
+            return
+
+        try:
+            resultado = sincronizar_archivo(ruta, ajuste)
+        except ErrorConversion as error:
+            self.sinc_resultado.configure(text=f"⚠ {error}")
+            return
+        except OSError as error:
+            self.sinc_resultado.configure(text=f"⚠ No se pudo guardar el archivo: {error}")
+            return
+
+        texto = f"✔ Guardado como: {resultado.ruta_salida.name}\n   {resultado.lineas_guardadas} líneas"
+        if resultado.lineas_recortadas or resultado.lineas_eliminadas:
+            texto += (
+                f" ({resultado.lineas_recortadas} recortadas y "
+                f"{resultado.lineas_eliminadas} eliminadas por quedar antes del segundo 0)"
+            )
+        self.sinc_resultado.configure(text=texto)
+        self.unir_sub.poner_ruta(resultado.ruta_salida)  # Listo para unir
+
+    # ======================================================================
+    # Pestaña 3: Unir al video (fase 3)
+    # ======================================================================
     def _crear_pestaña_unir(self, pestaña) -> None:
         self.unir_video = SelectorArchivo(pestaña, "Video MP4:", _TIPOS_VIDEO)
         self.unir_video.pack(fill="x", pady=(8, 4))
@@ -176,7 +378,9 @@ class VentanaPrincipal(ctk.CTk):
             pestaña, text="Unir subtítulo al video", command=lambda: _proximamente(3)
         ).pack(pady=8)
 
-    # ---------- Barra inferior: estado de FFmpeg (RF-16) ----------
+    # ======================================================================
+    # Barra inferior: estado de FFmpeg (RF-16)
+    # ======================================================================
     def _crear_barra_estado(self) -> None:
         if buscar_ffmpeg():
             texto, color = "✔ FFmpeg encontrado", "green"
