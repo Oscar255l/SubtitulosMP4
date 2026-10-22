@@ -1,0 +1,25 @@
+# Entorno virtual
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Editores
+.vscode/
+.idea/
+
+# Sistema
+Thumbs.db
+.DS_Store
+
+# Videos: nunca se suben al repositorio
+*.mp4
+*.mkv
+*.avi
+*.mov

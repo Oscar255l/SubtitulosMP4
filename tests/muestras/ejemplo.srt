@@ -1,0 +1,12 @@
+1
+00:00:06,000 --> 00:00:08,500
+Hey, are you coming tonight?
+
+2
+00:00:09,000 --> 00:00:11,200
+I don't know yet.
+Maybe later.
+
+3
+00:00:12,000 --> 00:00:14,000
+<i>Come on, it'll be fun!</i>
