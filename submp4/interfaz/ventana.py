@@ -1,15 +1,15 @@
 """Ventana principal de la app, hecha con CustomTkinter (RF-14 a RF-16).
 
-Por ahora es el ESQUELETO: las tres pestañas ya existen y la de
-Sincronizar ya calcula el desplazamiento por un punto. Los botones de
-"Convertir", "Aplicar" y "Unir" se conectan en las fases 1, 2 y 3.
+Estado: la pestaña Convertir ya funciona (fase 1). En Sincronizar ya se
+calcula el desplazamiento por un punto; "Aplicar" y "Unir" se conectan en
+las fases 2 y 3.
 """
 
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
-from submp4.nucleo.conversion import FORMATOS_ENTRADA
+from submp4.nucleo.conversion import FORMATOS_ENTRADA, ErrorConversion, convertir_a_srt
 from submp4.nucleo.sincronizacion import desplazamiento_por_punto
 from submp4.nucleo.tiempo import ms_a_texto
 from submp4.nucleo.unir_video import buscar_ffmpeg
@@ -54,8 +54,8 @@ class VentanaPrincipal(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("SubtitulosMP4")
-        self.geometry("720x420")
-        self.minsize(600, 380)
+        self.geometry("760x470")
+        self.minsize(640, 440)
 
         pestañas = ctk.CTkTabview(self)
         pestañas.pack(fill="both", expand=True, padx=12, pady=(12, 0))
@@ -73,9 +73,55 @@ class VentanaPrincipal(ctk.CTk):
         ).pack(anchor="w", pady=(8, 12))
         self.conv_entrada = SelectorArchivo(pestaña, "Subtítulo:", _TIPOS_SUBTITULO)
         self.conv_entrada.pack(fill="x", pady=4)
-        ctk.CTkButton(
-            pestaña, text="Convertir a SRT", command=lambda: _proximamente(1)
-        ).pack(pady=16)
+
+        fila_fps = ctk.CTkFrame(pestaña, fg_color="transparent")
+        fila_fps.pack(fill="x", pady=4)
+        ctk.CTkLabel(fila_fps, text="FPS del video:", width=110, anchor="w").pack(side="left")
+        self.conv_fps = ctk.CTkEntry(fila_fps, width=120, placeholder_text="ej. 23.976")
+        self.conv_fps.pack(side="left", padx=8)
+        ctk.CTkLabel(
+            fila_fps, text="(solo para archivos .sub; déjalo vacío en los demás)", text_color="gray"
+        ).pack(side="left")
+
+        ctk.CTkButton(pestaña, text="Convertir a SRT", command=self._convertir).pack(pady=16)
+        self.conv_resultado = ctk.CTkLabel(pestaña, text="", justify="left")
+        self.conv_resultado.pack(anchor="w")
+
+    def _convertir(self) -> None:
+        """Convierte el subtítulo elegido y muestra un resumen."""
+        if not self.conv_entrada.ruta:
+            self.conv_resultado.configure(text="⚠ Primero elige un subtítulo con «Buscar…».")
+            return
+
+        texto_fps = self.conv_fps.get().strip().replace(",", ".")
+        try:
+            fps = float(texto_fps) if texto_fps else None
+        except ValueError:
+            self.conv_resultado.configure(text="⚠ Los FPS deben ser un número, ej. 23.976")
+            return
+
+        try:
+            resultado = convertir_a_srt(self.conv_entrada.ruta, fps=fps)
+        except ErrorConversion as error:
+            self.conv_resultado.configure(text=f"⚠ {error}")
+            return
+        except OSError as error:  # Sin permisos, disco lleno, etc.
+            self.conv_resultado.configure(text=f"⚠ No se pudo guardar el archivo: {error}")
+            return
+
+        self.conv_resultado.configure(
+            text=(
+                f"✔ Guardado como: {resultado.ruta_salida.name}\n"
+                f"   Leído como {resultado.formato_origen.upper()} "
+                f"({resultado.codificacion_origen})\n"
+                f"   {resultado.lineas_guardadas} líneas guardadas, "
+                f"{resultado.efectos_quitados} letreros/efectos quitados"
+            )
+        )
+        # Dejar el SRT nuevo listo en las otras pestañas.
+        for selector in (self.sinc_entrada, self.unir_sub):
+            selector.entrada.delete(0, "end")
+            selector.entrada.insert(0, str(resultado.ruta_salida))
 
     # ---------- Pestaña 2: Sincronizar (fase 2) ----------
     def _crear_pestaña_sincronizar(self, pestaña) -> None:

@@ -43,9 +43,17 @@ escritorio que:
   - Convertir `{\i1}` y `{\b1}` en `<i>` y `<b>`.
   - Convertir `\N` y `\n` en saltos de línea reales.
   - Descartar dibujos vectoriales (`{\p1} ...`).
-  - **Quitar automáticamente** letreros, karaoke y efectos (por nombre de estilo
-    y por etiquetas de posición/movimiento).
-  - Fusionar en un solo bloque los diálogos que ocurren al mismo tiempo.
+  - **Quitar automáticamente** letreros, karaoke y efectos. Una línea se
+    considera efecto si:
+    - su estilo se llama Sign, Song, Kara, Lyric, Title, Typeset, Insert,
+      OP, ED, TS o FX (ej. `Signs`, `OP_Romaji`, `ED2`);
+    - es un dibujo, tiene karaoke (`\k`), movimiento (`\move`), recortes
+      (`\clip`), animación (`\t`), rotación (`\frz`) o cizallamiento (`\fax`);
+    - tiene `\pos` junto con tipografía (fuente, tamaño, color, borde);
+    - tiene algo en el campo *Effect* del ASS.
+    Un diálogo con solo `{\an8}` o `{\pos(...)}` se conserva.
+  - Fusionar los diálogos que se superponen: el tramo compartido muestra
+    ambos textos, porque el MP4 no puede mostrar dos subtítulos a la vez.
 - **RF-04** Para formatos basados en cuadros (MicroDVD), pedir o detectar los
   FPS del video.
 
@@ -109,7 +117,7 @@ escritorio que:
 | Fase | Contenido | Estado |
 |---|---|---|
 | 0 | Estructura, requisitos, ventana esqueleto, utilidades de tiempo y codificación | ✅ Hecho |
-| 1 | Conversión a SRT con limpieza de ASS (RF-01 a RF-04) | ⏳ Pendiente |
+| 1 | Conversión a SRT con limpieza de ASS (RF-01 a RF-04) | ✅ Hecho |
 | 2 | Sincronización (RF-05 a RF-09) | ⏳ Pendiente |
 | 3 | Unión al MP4 con FFmpeg (RF-10 a RF-13) | ⏳ Pendiente |
 | 4 | Extras (bilingüe, extraer pistas, arrastrar y soltar) | ⏳ Pendiente |

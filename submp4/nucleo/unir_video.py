@@ -8,6 +8,8 @@ argumentos y sin shell=True. Así un nombre de archivo raro como
 import shutil
 from pathlib import Path
 
+from submp4.nucleo.rutas import ruta_sin_conflicto
+
 
 def buscar_ffmpeg() -> str | None:
     """Devuelve la ruta de FFmpeg si está instalado, o None si no (RF-16)."""
@@ -21,18 +23,9 @@ def ruta_salida_disponible(ruta_video: Path) -> Path:
     Si ya existe   -> "Pelicula.subs (2).mp4", "Pelicula.subs (3).mp4"…
     """
     ruta_video = Path(ruta_video)
-    base = ruta_video.with_name(f"{ruta_video.stem}.subs{ruta_video.suffix}")
-    if not base.exists():
-        return base
-
-    numero = 2
-    while True:
-        candidata = ruta_video.with_name(
-            f"{ruta_video.stem}.subs ({numero}){ruta_video.suffix}"
-        )
-        if not candidata.exists():
-            return candidata
-        numero += 1
+    return ruta_sin_conflicto(
+        ruta_video.with_name(f"{ruta_video.stem}.subs{ruta_video.suffix}")
+    )
 
 
 def unir_subtitulos(ruta_video: Path, pistas: list[tuple[Path, str]]) -> Path:
