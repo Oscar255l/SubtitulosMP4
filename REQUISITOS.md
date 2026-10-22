@@ -26,7 +26,7 @@ escritorio que:
 | Formato de subtítulo final | SRT (dentro del MP4 como `mov_text`) | Es lo que soporta MP4 |
 | Motor de video | FFmpeg | Une pistas sin recodificar, en segundos |
 | Librería de subtítulos | pysubs2 | Lee y escribe muchos formatos |
-| Archivo de salida | Siempre un archivo nuevo | El original nunca se toca |
+| Archivo de salida | Siempre un archivo nuevo. Convertir y Sincronizar preguntan dónde guardar; Unir guarda junto al video | El original nunca se toca y yo decido dónde quedan los subtítulos |
 | Efectos de ASS | Se quitan automáticamente | Letreros y karaoke ensucian el SRT |
 | Repositorio | GitHub público | Portafolio y sustento de trabajos |
 
@@ -96,9 +96,26 @@ escritorio que:
 
 - **RF-14** Ventana con tres pestañas: *Convertir*, *Sincronizar* y *Unir al video*.
 - **RF-15** Seleccionar archivos con un botón "Buscar…".
+- **RF-15a** Convertir y Sincronizar abren la ventana "Guardar como" de Windows,
+  con el nombre sugerido (`Serie.srt`, `Serie.sync.srt`) y la carpeta del
+  archivo original. Si se cancela, no se guarda nada. Unir al video guarda
+  automáticamente en la carpeta del video.
 - **RF-16** Avisar al abrir la app si FFmpeg no está instalado y explicar cómo
   instalarlo.
-- **RF-17** (Deseable) Arrastrar y soltar archivos en la ventana.
+- **RF-17** Arrastrar y soltar archivos sobre cualquier campo de archivo
+  (librería `tkinterdnd2`). Si se suelta un archivo de otro tipo, la app avisa.
+  Es opcional: si la librería no carga, se sigue usando «Buscar…».
+
+### Subtítulo bilingüe (fase 4)
+
+- **RF-18** Al unir dos subtítulos, opción para agregar una tercera pista
+  bilingüe: el subtítulo 1 arriba (ej. inglés) y el subtítulo 2 en cursiva
+  debajo (ej. español). Se llama, por ejemplo, «Inglés + Español».
+- **RF-19** Como los dos subtítulos casi nunca tienen los mismos tiempos, cada
+  línea de la traducción se pega a la línea principal con la que más tiempo
+  comparte en pantalla y se muestra durante toda esa línea (sin parpadeos).
+  Las líneas de la traducción sin pareja se muestran solas.
+- **RF-20** La pista bilingüe se puede elegir como la activa al abrir el video.
 
 ## 4. Requisitos no funcionales
 
@@ -125,7 +142,6 @@ escritorio que:
 
 ## 5. Fuera de alcance (por ahora)
 
-- Subtítulos bilingües (inglés + español a la vez).
 - Extraer pistas de subtítulos que ya trae un MP4.
 - Soporte para MKV y otros contenedores.
 - Versión para celular.
@@ -138,4 +154,4 @@ escritorio que:
 | 1 | Conversión a SRT con limpieza de ASS (RF-01 a RF-04) | ✅ Hecho |
 | 2 | Sincronización (RF-05 a RF-09) | ✅ Hecho |
 | 3 | Unión al MP4 con FFmpeg (RF-10 a RF-13) | ✅ Hecho |
-| 4 | Extras (bilingüe, extraer pistas, arrastrar y soltar) | ⏳ Pendiente |
+| 4 | Pista bilingüe y arrastrar y soltar (RF-17 a RF-20) | ✅ Hecho |

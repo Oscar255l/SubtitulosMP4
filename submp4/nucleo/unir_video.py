@@ -28,6 +28,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from submp4.nucleo.bilingue import combinar_bilingue
 from submp4.nucleo.conversion import ErrorConversion, guardar_srt, leer_lineas
 from submp4.nucleo.rutas import ruta_sin_conflicto
 
@@ -164,7 +165,7 @@ def duracion_video(ruta_video: Path) -> float | None:
         salida = subprocess.run(  # nosec B603 - lista de argumentos, sin shell
             [ffprobe, "-v", "error", "-show_entries", "format=duration",
              "-of", "default=nw=1:nk=1", _como_archivo(ruta_video)],
-            capture_output=True, text=True, timeout=30, check=False,
+            capture_output=True, text=True, encoding="utf-8", timeout=30, check=False,
             creationflags=_SIN_VENTANA,
         )
         return float(salida.stdout.strip())
@@ -195,7 +196,9 @@ def fraccion_de_progreso(linea: str, duracion: float | None) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def _validar(ruta_video: Path, pistas: list[PistaSubtitulo], por_defecto: int | None) -> None:
+def _validar(
+    ruta_video: Path, pistas: list[PistaSubtitulo], por_defecto: int | None, bilingue: bool
+) -> None:
     if not ruta_video.is_file():
         raise ErrorUnion(f"No existe el video: {ruta_video}")
     if ruta_video.suffix.lower() != ".mp4":
@@ -205,7 +208,10 @@ def _validar(ruta_video: Path, pistas: list[PistaSubtitulo], por_defecto: int | 
     for pista in pistas:
         if not re.fullmatch(r"[a-z]{3}", pista.idioma):
             raise ErrorUnion(f"Código de idioma no válido: {pista.idioma!r}")
-    if por_defecto is not None and not 0 <= por_defecto < len(pistas):
+    if bilingue and len(pistas) != 2:
+        raise ErrorUnion("Para la pista bilingüe se necesitan exactamente dos subtítulos.")
+    total_pistas = len(pistas) + (1 if bilingue else 0)
+    if por_defecto is not None and not 0 <= por_defecto < total_pistas:
         raise ErrorUnion("La pista por defecto no existe.")
 
 
@@ -216,13 +222,17 @@ def unir_subtitulos(
     conservar_existentes: bool = True,
     al_progresar: Callable[[float], None] | None = None,
     ruta_salida: Path | None = None,
+    incluir_bilingue: bool = False,
 ) -> ResultadoUnion:
     """Une una o varias pistas de subtítulos al MP4, sin recodificar (RF-10, RF-11).
 
     al_progresar: función que recibe el avance (0 a 1) mientras FFmpeg trabaja.
+    incluir_bilingue: con dos pistas, agrega una tercera con la primera arriba
+        y la segunda en cursiva debajo (fase 4). Las pistas quedan en orden:
+        pista 1, pista 2, bilingüe; por_defecto=2 deja activa la bilingüe.
     """
     ruta_video = Path(ruta_video)
-    _validar(ruta_video, pistas, por_defecto)
+    _validar(ruta_video, pistas, por_defecto, incluir_bilingue)
 
     ffmpeg = buscar_ffmpeg()
     if not ffmpeg:
@@ -237,6 +247,7 @@ def unir_subtitulos(
 
         # Paso 1: cada subtítulo a SRT limpio en UTF-8.
         preparados = []
+        lecturas = []
         for indice, pista in enumerate(pistas):
             try:
                 lectura = leer_lineas(pista.ruta)
@@ -244,10 +255,22 @@ def unir_subtitulos(
                 raise ErrorUnion(f"Subtítulo «{Path(pista.ruta).name}»: {error}") from None
             if not lectura.lineas:
                 raise ErrorUnion(f"El subtítulo «{Path(pista.ruta).name}» no tiene diálogos.")
+            lecturas.append(lectura)
             temporal = carpeta / f"pista_{indice}.srt"
             guardar_srt(lectura.lineas, temporal, pista.ruta)
             nombre = pista.nombre or _nombre_de_idioma(pista.idioma)
             preparados.append((temporal, pista.idioma, nombre))
+
+        # Paso 1b (opcional): pista bilingüe, primera arriba y segunda en cursiva.
+        if incluir_bilingue:
+            temporal = carpeta / "pista_bilingue.srt"
+            guardar_srt(
+                combinar_bilingue(lecturas[0].lineas, lecturas[1].lineas),
+                temporal,
+                pistas[0].ruta,
+            )
+            nombre = f"{preparados[0][2]} + {preparados[1][2]}"  # Ej. "Inglés + Español"
+            preparados.append((temporal, pistas[0].idioma, nombre))
 
         # Paso 2: llamar a FFmpeg.
         comando = construir_comando(
@@ -286,4 +309,4 @@ def unir_subtitulos(
             )
             raise ErrorUnion(f"FFmpeg no pudo unir los subtítulos:\n{ultimas}{consejo}")
 
-    return ResultadoUnion(ruta_salida=salida, pistas_agregadas=len(pistas))
+    return ResultadoUnion(ruta_salida=salida, pistas_agregadas=len(preparados))

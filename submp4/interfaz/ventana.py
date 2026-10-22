@@ -1,15 +1,25 @@
-"""Ventana principal de la app, hecha con CustomTkinter (RF-14 a RF-16).
+"""Ventana principal de la app, hecha con CustomTkinter (RF-14 a RF-17).
 
 Las tres pestañas funcionan: Convertir (fase 1), Sincronizar (fase 2) y
-Unir al video (fase 3).
+Unir al video (fase 3). En la fase 4 se agregaron la pista bilingüe y
+arrastrar y soltar archivos.
 """
 
 import queue
 import re
 import threading
+import tkinter
+from pathlib import Path
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
+
+# Arrastrar y soltar (RF-17) es OPCIONAL: si la librería no está instalada
+# o no carga, la app funciona igual con el botón "Buscar…".
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+except ImportError:  # pragma: no cover - depende de la instalación
+    DND_FILES, TkinterDnD = None, None
 
 from submp4.nucleo.conversion import (
     FORMATOS_ENTRADA,
@@ -17,6 +27,7 @@ from submp4.nucleo.conversion import (
     LecturaSubtitulo,
     convertir_a_srt,
     leer_lineas,
+    ruta_srt_disponible,
 )
 from submp4.nucleo.sincronizacion import (
     AjusteLineal,
@@ -24,6 +35,7 @@ from submp4.nucleo.sincronizacion import (
     ajuste_por_punto,
     ajuste_por_segundos,
     describir_ajuste,
+    ruta_sincronizada_disponible,
     sincronizar_archivo,
 )
 from submp4.nucleo.tiempo import ms_a_texto
@@ -45,6 +57,7 @@ _TIPOS_VIDEO = [("Video MP4", "*.mp4")]
 # Opciones de "pista activa al abrir el video".
 _ACTIVA_1 = "Subtítulo 1"
 _ACTIVA_2 = "Subtítulo 2"
+_ACTIVA_BILINGUE = "Bilingüe"
 _ACTIVA_NINGUNA = "Ninguna"
 
 # Nombres de los tres modos de sincronización.
@@ -63,11 +76,46 @@ class SelectorArchivo(ctk.CTkFrame):
         super().__init__(padre, fg_color="transparent")
         self._tipos = tipos
         self._al_elegir = al_elegir
+        # Extensiones aceptadas, sacadas de los filtros (ej. {".srt", ".ass"}).
+        self._extensiones = {
+            patron[1:].lower()
+            for _, patrones in tipos
+            for patron in patrones.split()
+            if patron != "*.*"
+        }
 
-        ctk.CTkLabel(self, text=texto, width=110, anchor="w").pack(side="left")
+        self._etiqueta = ctk.CTkLabel(self, text=texto, width=110, anchor="w")
+        self._etiqueta.pack(side="left")
         self.entrada = ctk.CTkEntry(self, placeholder_text="Ningún archivo seleccionado")
         self.entrada.pack(side="left", fill="x", expand=True, padx=8)
         ctk.CTkButton(self, text="Buscar…", width=90, command=self._buscar).pack(side="left")
+
+    def activar_arrastrar(self) -> None:
+        """Permite soltar un archivo sobre esta fila (etiqueta o caja de texto)."""
+        for widget in (self, self._etiqueta, self.entrada):
+            # Los widgets de CustomTkinter están hechos de piezas internas de
+            # tkinter (_canvas, _entry, _label); el archivo cae sobre ellas.
+            for pieza in (widget, *(getattr(widget, n, None) for n in ("_canvas", "_entry", "_label"))):
+                if pieza is not None:
+                    pieza.drop_target_register(DND_FILES)
+                    pieza.dnd_bind("<<Drop>>", self._al_soltar)
+        self.entrada.configure(placeholder_text="Arrastra un archivo aquí o usa «Buscar…»")
+
+    def _al_soltar(self, evento):
+        """Recibe el archivo soltado. Si sueltan varios, se usa el primero."""
+        # tkinter entrega las rutas en un solo texto, con {llaves} si tienen espacios.
+        archivos = self.tk.splitlist(evento.data)
+        if not archivos:
+            return evento.action
+        ruta = archivos[0]
+        if self._extensiones and Path(ruta).suffix.lower() not in self._extensiones:
+            messagebox.showwarning(
+                "Archivo no válido",
+                f"Aquí solo se aceptan: {', '.join(sorted(self._extensiones))}",
+            )
+            return evento.action
+        self.poner_ruta(ruta)
+        return evento.action
 
     def _buscar(self) -> None:
         ruta = filedialog.askopenfilename(filetypes=self._tipos)
@@ -91,6 +139,22 @@ def _poner_texto(entrada, texto: str) -> None:
     entrada.insert(0, texto)
 
 
+def _pedir_donde_guardar(sugerida: Path, titulo: str) -> str:
+    """Abre la ventana "Guardar como" de Windows con un nombre ya sugerido.
+
+    Empieza en la carpeta del archivo original. Si el usuario elige un
+    archivo que ya existe, Windows le pregunta si quiere reemplazarlo.
+    Devuelve la ruta elegida, o "" si el usuario cancela.
+    """
+    return filedialog.asksaveasfilename(
+        title=titulo,
+        initialdir=str(sugerida.parent),
+        initialfile=sugerida.name,
+        defaultextension=".srt",
+        filetypes=[("Subtítulo SubRip", "*.srt")],
+    )
+
+
 def _resumen_linea(texto: str, largo: int = 45) -> str:
     """Texto corto de una línea para mostrar: sin etiquetas y en un renglón."""
     plano = re.sub(r"</?[ibu]>", "", texto).replace("\n", " / ")
@@ -101,8 +165,9 @@ class VentanaPrincipal(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("SubtitulosMP4")
-        self.geometry("780x540")
-        self.minsize(660, 500)
+        self.geometry("780x580")
+        self.minsize(660, 540)
+        self._arrastrar_disponible = self._cargar_arrastrar()
 
         # Subtítulo leído en la pestaña Sincronizar (para vista previa).
         self._sinc_lectura: LecturaSubtitulo | None = None
@@ -120,6 +185,22 @@ class VentanaPrincipal(ctk.CTk):
         self._crear_pestaña_sincronizar(pestañas.add("Sincronizar"))
         self._crear_pestaña_unir(pestañas.add("Unir al video"))
         self._crear_barra_estado()
+
+        if self._arrastrar_disponible:
+            for selector in (
+                self.conv_entrada, self.sinc_entrada, self.unir_video, self.unir_sub, self.unir_sub2
+            ):
+                selector.activar_arrastrar()
+
+    def _cargar_arrastrar(self) -> bool:
+        """Activa arrastrar y soltar si tkinterdnd2 está disponible (RF-17)."""
+        if TkinterDnD is None:
+            return False
+        try:
+            TkinterDnD._require(self)  # Carga la extensión tkdnd en esta ventana
+        except (RuntimeError, tkinter.TclError):
+            return False
+        return True
 
     # ======================================================================
     # Pestaña 1: Convertir (fase 1)
@@ -158,8 +239,15 @@ class VentanaPrincipal(ctk.CTk):
             self.conv_resultado.configure(text="⚠ Los FPS deben ser un número, ej. 23.976")
             return
 
+        ruta = self.conv_entrada.ruta
         try:
-            resultado = convertir_a_srt(self.conv_entrada.ruta, fps=fps)
+            # Revisar que se pueda leer ANTES de preguntar dónde guardar.
+            leer_lineas(ruta, fps)
+            destino = _pedir_donde_guardar(ruta_srt_disponible(ruta), "Guardar subtítulo convertido")
+            if not destino:
+                self.conv_resultado.configure(text="Cancelado: no se guardó nada.")
+                return
+            resultado = convertir_a_srt(ruta, ruta_salida=destino, fps=fps)
         except ErrorConversion as error:
             self.conv_resultado.configure(text=f"⚠ {error}")
             return
@@ -170,6 +258,7 @@ class VentanaPrincipal(ctk.CTk):
         self.conv_resultado.configure(
             text=(
                 f"✔ Guardado como: {resultado.ruta_salida.name}\n"
+                f"   En la carpeta: {resultado.ruta_salida.parent}\n"
                 f"   Leído como {resultado.formato_origen.upper()} "
                 f"({resultado.codificacion_origen})\n"
                 f"   {resultado.lineas_guardadas} líneas guardadas, "
@@ -359,7 +448,15 @@ class VentanaPrincipal(ctk.CTk):
             return
 
         try:
-            resultado = sincronizar_archivo(ruta, ajuste)
+            # Revisar que se pueda leer ANTES de preguntar dónde guardar.
+            leer_lineas(ruta)
+            destino = _pedir_donde_guardar(
+                ruta_sincronizada_disponible(ruta), "Guardar subtítulo sincronizado"
+            )
+            if not destino:
+                self.sinc_resultado.configure(text="Cancelado: no se guardó nada.")
+                return
+            resultado = sincronizar_archivo(ruta, ajuste, ruta_salida=destino)
         except ErrorConversion as error:
             self.sinc_resultado.configure(text=f"⚠ {error}")
             return
@@ -367,7 +464,11 @@ class VentanaPrincipal(ctk.CTk):
             self.sinc_resultado.configure(text=f"⚠ No se pudo guardar el archivo: {error}")
             return
 
-        texto = f"✔ Guardado como: {resultado.ruta_salida.name}\n   {resultado.lineas_guardadas} líneas"
+        texto = (
+            f"✔ Guardado como: {resultado.ruta_salida.name}\n"
+            f"   En la carpeta: {resultado.ruta_salida.parent}\n"
+            f"   {resultado.lineas_guardadas} líneas"
+        )
         if resultado.lineas_recortadas or resultado.lineas_eliminadas:
             texto += (
                 f" ({resultado.lineas_recortadas} recortadas y "
@@ -396,7 +497,7 @@ class VentanaPrincipal(ctk.CTk):
         fila_activa.pack(fill="x", pady=(10, 4))
         ctk.CTkLabel(fila_activa, text="Activo al abrir:", width=110, anchor="w").pack(side="left")
         self.unir_activa = ctk.CTkSegmentedButton(
-            fila_activa, values=[_ACTIVA_1, _ACTIVA_2, _ACTIVA_NINGUNA]
+            fila_activa, values=[_ACTIVA_1, _ACTIVA_2, _ACTIVA_BILINGUE, _ACTIVA_NINGUNA]
         )
         self.unir_activa.set(_ACTIVA_1)
         self.unir_activa.pack(side="left", padx=8)
@@ -405,7 +506,14 @@ class VentanaPrincipal(ctk.CTk):
             pestaña, text="Conservar los subtítulos que ya trae el video"
         )
         self.unir_conservar.select()  # Marcado por defecto
-        self.unir_conservar.pack(anchor="w", pady=6)
+        self.unir_conservar.pack(anchor="w", pady=(6, 2))
+
+        # Fase 4: pista extra con el subtítulo 1 arriba y el 2 en cursiva debajo.
+        self.unir_bilingue = ctk.CTkCheckBox(
+            pestaña,
+            text="Agregar también una pista bilingüe (subtítulo 1 arriba, subtítulo 2 en cursiva)",
+        )
+        self.unir_bilingue.pack(anchor="w", pady=(2, 6))
 
         self.unir_boton = ctk.CTkButton(
             pestaña, text="Unir subtítulos al video", command=self._unir
@@ -452,10 +560,25 @@ class VentanaPrincipal(ctk.CTk):
         pistas = [PistaSubtitulo(selector.ruta, IDIOMAS[menu.get()]) for selector, menu in filas]
         selectores = [selector for selector, _ in filas]
 
+        bilingue = bool(self.unir_bilingue.get())
+        if bilingue and len(filas) != 2:
+            self.unir_resultado.configure(
+                text="⚠ Para la pista bilingüe elige los dos subtítulos (ej. inglés y español)."
+            )
+            return
+
         # Qué pista queda activa: su posición dentro de las pistas elegidas.
+        # Orden final: subtítulo 1, subtítulo 2 y, al final, la bilingüe.
         activa = self.unir_activa.get()
         if activa == _ACTIVA_NINGUNA:
             por_defecto = None
+        elif activa == _ACTIVA_BILINGUE:
+            if not bilingue:
+                self.unir_resultado.configure(
+                    text="⚠ Elegiste la bilingüe como activa: marca «Agregar también una pista bilingüe»."
+                )
+                return
+            por_defecto = len(pistas)
         else:
             objetivo = self.unir_sub if activa == _ACTIVA_1 else self.unir_sub2
             if objetivo not in selectores:
@@ -475,18 +598,19 @@ class VentanaPrincipal(ctk.CTk):
 
         hilo = threading.Thread(
             target=self._trabajo_union,
-            args=(self.unir_video.ruta, pistas, por_defecto, bool(self.unir_conservar.get())),
+            args=(self.unir_video.ruta, pistas, por_defecto, bool(self.unir_conservar.get()), bilingue),
             daemon=True,
         )
         hilo.start()
         self.after(100, self._revisar_cola_union)
 
-    def _trabajo_union(self, video, pistas, por_defecto, conservar) -> None:
+    def _trabajo_union(self, video, pistas, por_defecto, conservar, bilingue) -> None:
         """Corre en segundo plano. NO toca la ventana: solo deja mensajes en la cola."""
         try:
             resultado = unir_subtitulos(
                 video, pistas, por_defecto, conservar,
                 al_progresar=lambda avance: self._cola_union.put(("avance", avance)),
+                incluir_bilingue=bilingue,
             )
             self._cola_union.put(("listo", resultado))
         except (ErrorUnion, OSError) as error:
@@ -508,6 +632,7 @@ class VentanaPrincipal(ctk.CTk):
                 elif tipo == "listo":
                     self._terminar_union(
                         f"✔ Listo: {dato.ruta_salida.name}\n"
+                        f"   Guardado junto al video, en: {dato.ruta_salida.parent}\n"
                         f"   {dato.pistas_agregadas} pista(s) de subtítulos agregada(s). "
                         "Ábrelo en VLC o MX Player y elige el subtítulo en el menú.",
                         avance=1,

@@ -10,6 +10,9 @@ Aplicación de escritorio para preparar subtítulos de series y películas en MP
   pero hablan en 00:01:23") o por dos puntos para corregir desfases.
 - 🎬 **Une** el subtítulo al MP4 como pista que se activa y desactiva desde el
   reproductor, sin recodificar el video.
+- 🌎 **Pista bilingüe:** inglés arriba y español en cursiva debajo, ideal para
+  practicar inglés.
+- 🖱️ **Arrastrar y soltar** archivos sobre la ventana.
 
 > Proyecto personal en desarrollo. Ver el avance en [REQUISITOS.md](REQUISITOS.md).
 
@@ -51,13 +54,14 @@ python main.py
 
 Flujo típico:
 
-1. **Convertir:** eliges el subtítulo descargado (ASS, VTT, SUB…) y se guarda
-   como `Serie.srt` limpio.
+1. **Convertir:** eliges el subtítulo descargado (ASS, VTT, SUB…) y la app te
+   pregunta dónde guardar el SRT limpio (sugiere `Serie.srt`).
 2. **Sincronizar:** la app muestra la primera línea; escribes cuándo empiezan a
-   hablar en el video y se guarda `Serie.sync.srt`.
+   hablar en el video y eliges dónde guardar (sugiere `Serie.sync.srt`).
 3. **Unir al video:** eliges el MP4, uno o dos subtítulos (ej. inglés y español)
-   y se crea `Serie.subs.mp4`. En VLC o MX Player activas o desactivas el
-   subtítulo desde el menú.
+   y se crea `Serie.subs.mp4` en la misma carpeta del video. En VLC o MX Player activas o desactivas el
+   subtítulo desde el menú. Si marcas la pista bilingüe, también tendrás una
+   pista «Inglés + Español» con ambos idiomas a la vez.
 
 Ningún paso modifica los archivos originales.
 
@@ -73,6 +77,7 @@ SubtitulosMP4/
 │   │   ├── codificacion.py  # Leer archivos con ñ y tildes sin errores
 │   │   ├── conversion.py    # Pasar cualquier formato a SRT
 │   │   ├── sincronizacion.py# Desplazar y ajustar tiempos
+│   │   ├── bilingue.py      # Combinar inglés + español en una pista
 │   │   └── unir_video.py    # Llamar a FFmpeg para unir al MP4
 │   └── interfaz/
 │       └── ventana.py       # Ventana con CustomTkinter

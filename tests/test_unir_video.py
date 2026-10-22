@@ -147,7 +147,7 @@ def _pistas_de_subtitulos(ruta: Path) -> list[dict]:
         ["ffprobe", "-v", "error", "-select_streams", "s",
          "-show_entries", "stream=codec_name:stream_tags=language,handler_name"
          ":stream_disposition=default", "-of", "json", f"file:{ruta}"],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, encoding="utf-8", check=True,
     )
     return json.loads(salida.stdout)["streams"]
 
@@ -203,8 +203,10 @@ def test_acepta_ass_y_codificacion_windows(tmp_path):
 @necesita_ffmpeg
 def test_nombres_de_archivo_peligrosos(tmp_path):
     # Nombres que intentan parecer opciones o comandos: deben tratarse como archivos.
+    # "&" separa comandos en la consola de Windows y ";" en la de Linux.
+    # (Sin comillas: Windows no las permite en nombres de archivo.)
     video = _crear_video(tmp_path / "-y.mp4")
-    subtitulo = Path(shutil.copy(MUESTRAS / "ejemplo.srt", tmp_path / 'a"; echo hackeado #.srt'))
+    subtitulo = Path(shutil.copy(MUESTRAS / "ejemplo.srt", tmp_path / "a & echo hackeado; #.srt"))
 
     resultado = unir_subtitulos(video, [PistaSubtitulo(subtitulo, "eng")])
 
@@ -220,3 +222,55 @@ def test_video_danado_no_deja_archivo_a_medias(tmp_path):
     with pytest.raises(ErrorUnion, match="FFmpeg no pudo"):
         unir_subtitulos(video, [PistaSubtitulo(MUESTRAS / "ejemplo.srt", "eng")])
     assert not (tmp_path / "danado.subs.mp4").exists()
+
+
+# ---------- Pista bilingüe (fase 4) ----------
+
+
+def test_bilingue_necesita_dos_subtitulos(tmp_path):
+    video = tmp_path / "video.mp4"
+    video.touch()
+    with pytest.raises(ErrorUnion, match="dos subtítulos"):
+        unir_subtitulos(video, [PistaSubtitulo(MUESTRAS / "ejemplo.srt")], incluir_bilingue=True)
+
+
+def test_bilingue_permite_dejarla_activa(tmp_path):
+    video = tmp_path / "video.mp4"
+    video.touch()
+    pistas = [PistaSubtitulo(MUESTRAS / "ejemplo.srt"), PistaSubtitulo(MUESTRAS / "ejemplo.srt")]
+    with pytest.raises(ErrorUnion, match="por defecto"):
+        unir_subtitulos(video, pistas, por_defecto=2)  # Sin bilingüe, la 2 no existe
+
+
+def _texto_de_pista(ruta: Path, pista: int) -> str:
+    salida = subprocess.run(  # nosec B603 B607 - comando fijo, solo en pruebas
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", f"file:{ruta}",
+         "-map", f"0:s:{pista}", "-f", "srt", "pipe:1"],
+        capture_output=True, text=True, encoding="utf-8", check=True,
+    )
+    return salida.stdout
+
+
+@necesita_ffmpeg
+def test_unir_con_pista_bilingue(tmp_path):
+    video = _crear_video(tmp_path / "Serie.mp4")
+    espanol = tmp_path / "es.srt"
+    espanol.write_text(
+        "1\n00:00:06,100 --> 00:00:08,600\n¿Vienes esta noche?\n\n"
+        "2\n00:00:09,000 --> 00:00:11,200\nAún no sé.\nQuizás luego.\n",
+        encoding="utf-8",
+    )
+
+    resultado = unir_subtitulos(
+        video,
+        [PistaSubtitulo(MUESTRAS / "ejemplo.srt", "eng"), PistaSubtitulo(espanol, "spa")],
+        por_defecto=2,
+        incluir_bilingue=True,
+    )
+
+    assert resultado.pistas_agregadas == 3
+    pistas = _pistas_de_subtitulos(resultado.ruta_salida)
+    assert [p["tags"]["handler_name"] for p in pistas] == ["Inglés", "Español", "Inglés + Español"]
+    assert [p["disposition"]["default"] for p in pistas] == [0, 0, 1]
+    bilingue = _texto_de_pista(resultado.ruta_salida, 2)
+    assert "Hey, are you coming tonight?\n<i>¿Vienes esta noche?</i>" in bilingue
