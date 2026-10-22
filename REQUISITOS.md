@@ -82,7 +82,15 @@ escritorio que:
   queda activa por defecto.
 - **RF-12** Guardar como `Nombre.subs.mp4` junto al original; si ya existe,
   usar `Nombre.subs (2).mp4`, etc. Nunca sobrescribir.
-- **RF-13** Mostrar el progreso y un mensaje claro si FFmpeg falla.
+- **RF-13** Mostrar el progreso y un mensaje claro si FFmpeg falla. Si falla,
+  se borra el archivo a medio hacer.
+- **RF-13a** Antes de unir, cada subtítulo pasa por la misma limpieza de la
+  conversión (UTF-8, sin efectos, sin superposiciones), así se puede unir
+  directamente un ASS o un SRT en Windows-1252.
+- **RF-13b** Opción para conservar los subtítulos que el video ya traía.
+  Las pistas nuevas quedan primero.
+- **RF-13c** La unión corre en segundo plano: la ventana no se congela y no
+  se puede cerrar a mitad de una unión.
 
 ### Interfaz (crece en cada fase)
 
@@ -99,12 +107,17 @@ escritorio que:
 - **RNF-03 Seguridad:**
   - FFmpeg se ejecuta con `subprocess` pasando una **lista de argumentos**,
     nunca con `shell=True` (evita inyección de comandos por nombres de archivo).
-  - Se validan las rutas antes de usarlas.
+  - Se validan las rutas antes de usarlas, y se pasan a FFmpeg absolutas y con
+    el prefijo `file:`, para que un archivo llamado `-y.mp4` no se tome como
+    una opción ni uno llamado `http:algo` como una dirección de internet.
+  - FFmpeg se llama con `-n`, así nunca sobrescribe un archivo.
+  - Hay pruebas automáticas con nombres de archivo maliciosos.
 - **RNF-04** El núcleo (lógica) está separado de la interfaz, para poder
   probarlo sin abrir ventanas.
-- **RNF-05** Pruebas automáticas con `pytest` para la lógica del núcleo.
-- **RNF-06** Integración continua en GitHub Actions: pruebas + análisis SAST
-  con Bandit en cada push.
+- **RNF-05** Pruebas automáticas con `pytest` para la lógica del núcleo,
+  incluidas pruebas con FFmpeg real sobre un video generado.
+- **RNF-06** Integración continua en GitHub Actions: instala FFmpeg, corre las
+  pruebas y hace análisis SAST con Bandit en cada push.
 - **RNF-07** Código comentado en español.
 - **RNF-08** Licencia MIT.
 - **RNF-09** El repositorio no incluye videos ni subtítulos con derechos de autor;
@@ -124,5 +137,5 @@ escritorio que:
 | 0 | Estructura, requisitos, ventana esqueleto, utilidades de tiempo y codificación | ✅ Hecho |
 | 1 | Conversión a SRT con limpieza de ASS (RF-01 a RF-04) | ✅ Hecho |
 | 2 | Sincronización (RF-05 a RF-09) | ✅ Hecho |
-| 3 | Unión al MP4 con FFmpeg (RF-10 a RF-13) | ⏳ Pendiente |
+| 3 | Unión al MP4 con FFmpeg (RF-10 a RF-13) | ✅ Hecho |
 | 4 | Extras (bilingüe, extraer pistas, arrastrar y soltar) | ⏳ Pendiente |

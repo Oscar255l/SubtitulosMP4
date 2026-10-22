@@ -49,6 +49,18 @@ pip install -r requirements.txt
 python main.py
 ```
 
+Flujo típico:
+
+1. **Convertir:** eliges el subtítulo descargado (ASS, VTT, SUB…) y se guarda
+   como `Serie.srt` limpio.
+2. **Sincronizar:** la app muestra la primera línea; escribes cuándo empiezan a
+   hablar en el video y se guarda `Serie.sync.srt`.
+3. **Unir al video:** eliges el MP4, uno o dos subtítulos (ej. inglés y español)
+   y se crea `Serie.subs.mp4`. En VLC o MX Player activas o desactivas el
+   subtítulo desde el menú.
+
+Ningún paso modifica los archivos originales.
+
 ## Estructura del proyecto
 
 ```
@@ -57,6 +69,7 @@ SubtitulosMP4/
 ├── submp4/
 │   ├── nucleo/              # Lógica, sin interfaz (se puede probar sola)
 │   │   ├── tiempo.py        # Convertir "00:01:23" ⇄ milisegundos
+│   │   ├── rutas.py         # Nombres de salida sin pisar archivos
 │   │   ├── codificacion.py  # Leer archivos con ñ y tildes sin errores
 │   │   ├── conversion.py    # Pasar cualquier formato a SRT
 │   │   ├── sincronizacion.py# Desplazar y ajustar tiempos

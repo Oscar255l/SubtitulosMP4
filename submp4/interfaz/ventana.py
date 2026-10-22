@@ -1,10 +1,12 @@
 """Ventana principal de la app, hecha con CustomTkinter (RF-14 a RF-16).
 
-Estado: Convertir (fase 1) y Sincronizar (fase 2) ya funcionan.
-"Unir al video" se conecta en la fase 3.
+Las tres pestañas funcionan: Convertir (fase 1), Sincronizar (fase 2) y
+Unir al video (fase 3).
 """
 
+import queue
 import re
+import threading
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
@@ -25,15 +27,25 @@ from submp4.nucleo.sincronizacion import (
     sincronizar_archivo,
 )
 from submp4.nucleo.tiempo import ms_a_texto
-from submp4.nucleo.unir_video import buscar_ffmpeg
+from submp4.nucleo.unir_video import (
+    IDIOMAS,
+    ErrorUnion,
+    PistaSubtitulo,
+    buscar_ffmpeg,
+    unir_subtitulos,
+)
 
 # Filtros para el cuadro de "Buscar…" de Windows.
 _TIPOS_SUBTITULO = [
     ("Subtítulos", " ".join(f"*{ext}" for ext in FORMATOS_ENTRADA)),
     ("Todos los archivos", "*.*"),
 ]
-_TIPOS_SRT = [("SubRip", "*.srt")]
 _TIPOS_VIDEO = [("Video MP4", "*.mp4")]
+
+# Opciones de "pista activa al abrir el video".
+_ACTIVA_1 = "Subtítulo 1"
+_ACTIVA_2 = "Subtítulo 2"
+_ACTIVA_NINGUNA = "Ninguna"
 
 # Nombres de los tres modos de sincronización.
 _MODO_SEGUNDOS = "Por segundos"
@@ -85,10 +97,6 @@ def _resumen_linea(texto: str, largo: int = 45) -> str:
     return plano if len(plano) <= largo else plano[: largo - 1] + "…"
 
 
-def _proximamente(fase: int) -> None:
-    messagebox.showinfo("En construcción", f"Esta función llega en la fase {fase}.")
-
-
 class VentanaPrincipal(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -99,6 +107,11 @@ class VentanaPrincipal(ctk.CTk):
         # Subtítulo leído en la pestaña Sincronizar (para vista previa).
         self._sinc_lectura: LecturaSubtitulo | None = None
         self._sinc_ruta_leida = ""
+
+        # La unión corre en segundo plano; se comunica con la ventana por una cola.
+        self._uniendo = False
+        self._cola_union: queue.Queue = queue.Queue()
+        self.protocol("WM_DELETE_WINDOW", self._al_cerrar)
 
         pestañas = ctk.CTkTabview(self)
         pestañas.pack(fill="both", expand=True, padx=12, pady=(12, 0))
@@ -369,14 +382,161 @@ class VentanaPrincipal(ctk.CTk):
     def _crear_pestaña_unir(self, pestaña) -> None:
         self.unir_video = SelectorArchivo(pestaña, "Video MP4:", _TIPOS_VIDEO)
         self.unir_video.pack(fill="x", pady=(8, 4))
-        self.unir_sub = SelectorArchivo(pestaña, "Subtítulo SRT:", _TIPOS_SRT)
-        self.unir_sub.pack(fill="x", pady=4)
+
+        # Dos pistas: normalmente inglés y español. La segunda es opcional.
+        self.unir_sub, self.unir_idioma_1 = self._crear_fila_pista(pestaña, "Subtítulo 1:", "Inglés")
+        self.unir_sub2, self.unir_idioma_2 = self._crear_fila_pista(
+            pestaña, "Subtítulo 2:", "Español"
+        )
         ctk.CTkLabel(
-            pestaña, text="Se crea un archivo nuevo; el video original no se toca."
-        ).pack(anchor="w", pady=8)
-        ctk.CTkButton(
-            pestaña, text="Unir subtítulo al video", command=lambda: _proximamente(3)
-        ).pack(pady=8)
+            pestaña, text="El subtítulo 2 es opcional. Acepta SRT, ASS, VTT…", text_color="gray"
+        ).pack(anchor="w")
+
+        fila_activa = ctk.CTkFrame(pestaña, fg_color="transparent")
+        fila_activa.pack(fill="x", pady=(10, 4))
+        ctk.CTkLabel(fila_activa, text="Activo al abrir:", width=110, anchor="w").pack(side="left")
+        self.unir_activa = ctk.CTkSegmentedButton(
+            fila_activa, values=[_ACTIVA_1, _ACTIVA_2, _ACTIVA_NINGUNA]
+        )
+        self.unir_activa.set(_ACTIVA_1)
+        self.unir_activa.pack(side="left", padx=8)
+
+        self.unir_conservar = ctk.CTkCheckBox(
+            pestaña, text="Conservar los subtítulos que ya trae el video"
+        )
+        self.unir_conservar.select()  # Marcado por defecto
+        self.unir_conservar.pack(anchor="w", pady=6)
+
+        self.unir_boton = ctk.CTkButton(
+            pestaña, text="Unir subtítulos al video", command=self._unir
+        )
+        self.unir_boton.pack(pady=8)
+        self.unir_barra = ctk.CTkProgressBar(pestaña)
+        self.unir_barra.set(0)
+        self.unir_barra.pack(fill="x", padx=4, pady=4)
+        self.unir_resultado = ctk.CTkLabel(
+            pestaña,
+            text="Se crea un archivo nuevo; el video original no se toca.",
+            justify="left",
+        )
+        self.unir_resultado.pack(anchor="w")
+
+    def _crear_fila_pista(self, padre, texto: str, idioma: str):
+        """Fila con selector de subtítulo + menú de idioma."""
+        fila = ctk.CTkFrame(padre, fg_color="transparent")
+        fila.pack(fill="x", pady=4)
+        selector = SelectorArchivo(fila, texto, _TIPOS_SUBTITULO)
+        selector.pack(side="left", fill="x", expand=True)
+        menu_idioma = ctk.CTkOptionMenu(fila, values=list(IDIOMAS), width=130)
+        menu_idioma.set(idioma)
+        menu_idioma.pack(side="left", padx=(8, 0))
+        return selector, menu_idioma
+
+    def _unir(self) -> None:
+        """Valida lo elegido y lanza la unión en segundo plano."""
+        if self._uniendo:
+            return
+        if not self.unir_video.ruta:
+            self.unir_resultado.configure(text="⚠ Primero elige el video MP4.")
+            return
+
+        # Solo las filas que tienen un archivo elegido.
+        filas = [
+            (selector, menu)
+            for selector, menu in ((self.unir_sub, self.unir_idioma_1), (self.unir_sub2, self.unir_idioma_2))
+            if selector.ruta
+        ]
+        if not filas:
+            self.unir_resultado.configure(text="⚠ Elige al menos un subtítulo.")
+            return
+        pistas = [PistaSubtitulo(selector.ruta, IDIOMAS[menu.get()]) for selector, menu in filas]
+        selectores = [selector for selector, _ in filas]
+
+        # Qué pista queda activa: su posición dentro de las pistas elegidas.
+        activa = self.unir_activa.get()
+        if activa == _ACTIVA_NINGUNA:
+            por_defecto = None
+        else:
+            objetivo = self.unir_sub if activa == _ACTIVA_1 else self.unir_sub2
+            if objetivo not in selectores:
+                self.unir_resultado.configure(
+                    text=f"⚠ Elegiste el {activa.lower()} como activo, pero está vacío."
+                )
+                return
+            por_defecto = selectores.index(objetivo)
+
+        # Preparar la ventana mientras FFmpeg trabaja.
+        self._uniendo = True
+        self.unir_boton.configure(state="disabled", text="Uniendo…")
+        self.unir_resultado.configure(text="Uniendo… esto suele tardar unos segundos.")
+        self.unir_barra.configure(mode="indeterminate")
+        self.unir_barra.start()
+        self._barra_con_avance = False
+
+        hilo = threading.Thread(
+            target=self._trabajo_union,
+            args=(self.unir_video.ruta, pistas, por_defecto, bool(self.unir_conservar.get())),
+            daemon=True,
+        )
+        hilo.start()
+        self.after(100, self._revisar_cola_union)
+
+    def _trabajo_union(self, video, pistas, por_defecto, conservar) -> None:
+        """Corre en segundo plano. NO toca la ventana: solo deja mensajes en la cola."""
+        try:
+            resultado = unir_subtitulos(
+                video, pistas, por_defecto, conservar,
+                al_progresar=lambda avance: self._cola_union.put(("avance", avance)),
+            )
+            self._cola_union.put(("listo", resultado))
+        except (ErrorUnion, OSError) as error:
+            self._cola_union.put(("error", str(error)))
+
+    def _revisar_cola_union(self) -> None:
+        """Lee los mensajes del trabajo en segundo plano y actualiza la ventana."""
+        terminado = False
+        try:
+            while True:
+                tipo, dato = self._cola_union.get_nowait()
+                if tipo == "avance":
+                    if not self._barra_con_avance:  # Pasar de "animada" a porcentaje
+                        self.unir_barra.stop()
+                        self.unir_barra.configure(mode="determinate")
+                        self._barra_con_avance = True
+                    self.unir_barra.set(dato)
+                    self.unir_resultado.configure(text=f"Uniendo… {dato:.0%}")
+                elif tipo == "listo":
+                    self._terminar_union(
+                        f"✔ Listo: {dato.ruta_salida.name}\n"
+                        f"   {dato.pistas_agregadas} pista(s) de subtítulos agregada(s). "
+                        "Ábrelo en VLC o MX Player y elige el subtítulo en el menú.",
+                        avance=1,
+                    )
+                    terminado = True
+                elif tipo == "error":
+                    self._terminar_union(f"⚠ {dato}", avance=0)
+                    terminado = True
+        except queue.Empty:
+            pass
+        if not terminado:
+            self.after(100, self._revisar_cola_union)
+
+    def _terminar_union(self, mensaje: str, avance: float) -> None:
+        self._uniendo = False
+        self.unir_barra.stop()
+        self.unir_barra.configure(mode="determinate")
+        self.unir_barra.set(avance)
+        self.unir_boton.configure(state="normal", text="Unir subtítulos al video")
+        self.unir_resultado.configure(text=mensaje)
+
+    def _al_cerrar(self) -> None:
+        """No dejar cerrar la ventana a mitad de una unión (quedaría un archivo dañado)."""
+        if self._uniendo:
+            messagebox.showwarning(
+                "Espera un momento", "Se están uniendo los subtítulos. Espera a que termine."
+            )
+            return
+        self.destroy()
 
     # ======================================================================
     # Barra inferior: estado de FFmpeg (RF-16)
