@@ -14,6 +14,9 @@ escritorio que:
 2. Lo **sincronice** con el video.
 3. Lo **una al MP4** como pista que se puede activar y desactivar (subtítulo
    "suave", no quemado en la imagen).
+4. **Mejore el audio**: en muchas películas los efectos (explosiones,
+   disparos) suenan muy fuerte y las voces muy bajas. Al subir el volumen para
+   entender los diálogos, el siguiente efecto revienta los oídos.
 
 ## 2. Decisiones tomadas
 
@@ -29,6 +32,8 @@ escritorio que:
 | Archivo de salida | Siempre un archivo nuevo. Convertir y Sincronizar preguntan dónde guardar; Unir guarda junto al video | El original nunca se toca y yo decido dónde quedan los subtítulos |
 | Efectos de ASS | Se quitan automáticamente | Letreros y karaoke ensucian el SRT |
 | Repositorio | GitHub público | Portafolio y sustento de trabajos |
+| Mejora de audio | Filtros de FFmpeg (mezcla del canal central + compresión dinámica), no IA | Rápido en un portátil sin tarjeta gráfica; la separación con IA (ej. Demucs) tardaría más de una hora por película |
+| Pista de audio mejorada | Pista nueva, activa al abrir; las originales se conservan | Se puede comparar y volver al sonido original desde el reproductor |
 
 ## 3. Requisitos funcionales
 
@@ -94,7 +99,8 @@ escritorio que:
 
 ### Interfaz (crece en cada fase)
 
-- **RF-14** Ventana con tres pestañas: *Convertir*, *Sincronizar* y *Unir al video*.
+- **RF-14** Ventana con cuatro pestañas: *Convertir*, *Sincronizar*, *Unir al
+  video* y *Mejorar audio*.
 - **RF-15** Seleccionar archivos con un botón "Buscar…".
 - **RF-15a** Convertir y Sincronizar abren la ventana "Guardar como" de Windows,
   con el nombre sugerido (`Serie.srt`, `Serie.sync.srt`) y la carpeta del
@@ -117,6 +123,32 @@ escritorio que:
   Las líneas de la traducción sin pareja se muestran solas.
 - **RF-20** La pista bilingüe se puede elegir como la activa al abrir el video.
 
+### Mejorar audio (fase 5)
+
+- **RF-21** Crear `Nombre.audio.mp4` junto al video con una pista de audio
+  nueva donde las voces se oyen más claras y los efectos fuertes se controlan.
+  El video se copia sin recodificar; solo se procesa el audio (AAC estéreo,
+  192 kbps).
+- **RF-22** Leer las pistas de audio del video (idioma, canales, nombre) y
+  dejar elegir cuál mejorar. Se propone sola: la primera en inglés con más
+  canales, sin volver a procesar una pista ya mejorada.
+- **RF-23** Si la pista es **5.1 o 7.1**, pasarla a estéreo dándole más peso al
+  canal central (donde van los diálogos) y menos a los frontales, traseros y
+  subwoofer. Si es **estéreo**, reducir los sonidos de los lados. En todos los
+  casos: bajar graves, realzar la zona de la voz (3 kHz), comprimir los golpes,
+  normalizar el volumen y limitar los picos.
+- **RF-24** Tres intensidades: *Suave*, *Media* (recomendada) y *Fuerte*.
+- **RF-25** La pista nueva queda activa al abrir el video y se llama, por
+  ejemplo, «Inglés · Voces mejoradas (Media)». Opción para conservar las pistas
+  originales, que quedan con nombres claros («Inglés · Original (5.1)»).
+  Los subtítulos que ya traía el video se conservan.
+- **RF-26** Probar con un fragmento: procesar solo 2 minutos desde el tiempo
+  que elija el usuario (`Nombre.audio-prueba.mp4`, con la pista original para
+  comparar), para escuchar el resultado antes de procesar toda la película.
+- **RF-27** Corre en segundo plano con barra de progreso. Solo un proceso de
+  FFmpeg a la vez (unir o mejorar), y la ventana no se puede cerrar mientras
+  tanto.
+
 ## 4. Requisitos no funcionales
 
 - **RNF-01** Funciona en Windows 10/11 con 8 GB de RAM, sin conexión a internet.
@@ -128,11 +160,15 @@ escritorio que:
     el prefijo `file:`, para que un archivo llamado `-y.mp4` no se tome como
     una opción ni uno llamado `http:algo` como una dirección de internet.
   - FFmpeg se llama con `-n`, así nunca sobrescribe un archivo.
+  - Todo el uso de FFmpeg y ffprobe está en un solo módulo (`ffmpeg.py`), así
+    las protecciones se aplican igual en todas las funciones.
   - Hay pruebas automáticas con nombres de archivo maliciosos.
 - **RNF-04** El núcleo (lógica) está separado de la interfaz, para poder
   probarlo sin abrir ventanas.
 - **RNF-05** Pruebas automáticas con `pytest` para la lógica del núcleo,
-  incluidas pruebas con FFmpeg real sobre un video generado.
+  incluidas pruebas con FFmpeg real sobre un video generado. Las pruebas de
+  audio **miden en decibeles** que la voz suba y que la diferencia con los
+  efectos baje, con audio 5.1 y estéreo creados para la prueba.
 - **RNF-06** Integración continua en GitHub Actions: instala FFmpeg, corre las
   pruebas y hace análisis SAST con Bandit en cada push.
 - **RNF-07** Código comentado en español.
@@ -144,6 +180,8 @@ escritorio que:
 
 - Extraer pistas de subtítulos que ya trae un MP4.
 - Soporte para MKV y otros contenedores.
+- Separar voz y efectos con inteligencia artificial (ej. Demucs): mejor
+  resultado en audio estéreo, pero muy lento sin tarjeta gráfica.
 - Versión para celular.
 
 ## 6. Fases
@@ -155,3 +193,4 @@ escritorio que:
 | 2 | Sincronización (RF-05 a RF-09) | ✅ Hecho |
 | 3 | Unión al MP4 con FFmpeg (RF-10 a RF-13) | ✅ Hecho |
 | 4 | Pista bilingüe y arrastrar y soltar (RF-17 a RF-20) | ✅ Hecho |
+| 5 | Mejorar audio: voces claras y efectos controlados (RF-21 a RF-27) | ✅ Hecho |

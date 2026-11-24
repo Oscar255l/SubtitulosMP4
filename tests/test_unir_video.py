@@ -6,11 +6,11 @@ from pathlib import Path
 import pytest
 
 from submp4.nucleo.conversion import es_formato_soportado
+from submp4.nucleo.ffmpeg import fraccion_de_progreso
 from submp4.nucleo.unir_video import (
     ErrorUnion,
     PistaSubtitulo,
     construir_comando,
-    fraccion_de_progreso,
     ruta_salida_disponible,
     unir_subtitulos,
 )
@@ -212,6 +212,17 @@ def test_nombres_de_archivo_peligrosos(tmp_path):
 
     assert resultado.ruta_salida.name == "-y.subs.mp4"
     assert len(_pistas_de_subtitulos(resultado.ruta_salida)) == 1
+
+
+@necesita_ffmpeg
+def test_no_toca_un_archivo_que_ya_existe(tmp_path):
+    video = _crear_video(tmp_path / "Serie.mp4", segundos=2)
+    existente = tmp_path / "importante.mp4"
+    existente.write_text("no me borres", encoding="utf-8")
+
+    with pytest.raises(ErrorUnion, match="Ya existe"):
+        unir_subtitulos(video, [PistaSubtitulo(MUESTRAS / "ejemplo.srt")], ruta_salida=existente)
+    assert existente.read_text(encoding="utf-8") == "no me borres"
 
 
 @necesita_ffmpeg

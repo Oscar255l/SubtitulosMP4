@@ -1,8 +1,7 @@
-"""Ventana principal de la app, hecha con CustomTkinter (RF-14 a RF-17).
+"""Ventana principal de la app, hecha con CustomTkinter (RF-14 a RF-17, RF-25).
 
-Las tres pestañas funcionan: Convertir (fase 1), Sincronizar (fase 2) y
-Unir al video (fase 3). En la fase 4 se agregaron la pista bilingüe y
-arrastrar y soltar archivos.
+Pestañas: Convertir (fase 1), Sincronizar (fase 2), Unir al video (fase 3,
+con la pista bilingüe de la fase 4) y Mejorar audio (fase 5).
 """
 
 import queue
@@ -21,6 +20,16 @@ try:
 except ImportError:  # pragma: no cover - depende de la instalación
     DND_FILES, TkinterDnD = None, None
 
+from submp4.nucleo.audio import (
+    DURACION_PRUEBA,
+    NIVELES,
+    ErrorAudio,
+    PistaAudio,
+    analizar_audio,
+    elegir_pista,
+    mejorar_audio,
+    probar_fragmento,
+)
 from submp4.nucleo.conversion import (
     FORMATOS_ENTRADA,
     ErrorConversion,
@@ -38,14 +47,10 @@ from submp4.nucleo.sincronizacion import (
     ruta_sincronizada_disponible,
     sincronizar_archivo,
 )
+from submp4.nucleo.ffmpeg import buscar_ffmpeg
+from submp4.nucleo.idiomas import IDIOMAS
 from submp4.nucleo.tiempo import ms_a_texto
-from submp4.nucleo.unir_video import (
-    IDIOMAS,
-    ErrorUnion,
-    PistaSubtitulo,
-    buscar_ffmpeg,
-    unir_subtitulos,
-)
+from submp4.nucleo.unir_video import ErrorUnion, PistaSubtitulo, unir_subtitulos
 
 # Filtros para el cuadro de "Buscar…" de Windows.
 _TIPOS_SUBTITULO = [
@@ -59,6 +64,13 @@ _ACTIVA_1 = "Subtítulo 1"
 _ACTIVA_2 = "Subtítulo 2"
 _ACTIVA_BILINGUE = "Bilingüe"
 _ACTIVA_NINGUNA = "Ninguna"
+
+# Intensidades de "Mejorar audio" y su explicación.
+_AYUDA_NIVELES = {
+    "Suave": "Cambio leve: el sonido se parece al original, pero sin golpes tan fuertes.",
+    "Media": "Recomendado: voces claras y efectos controlados.",
+    "Fuerte": "Voces al frente y efectos bajos. Ideal para ver de noche o con audífonos.",
+}
 
 # Nombres de los tres modos de sincronización.
 _MODO_SEGUNDOS = "Por segundos"
@@ -161,21 +173,108 @@ def _resumen_linea(texto: str, largo: int = 45) -> str:
     return plano if len(plano) <= largo else plano[: largo - 1] + "…"
 
 
+class TareaEnSegundoPlano:
+    """Corre un trabajo largo con FFmpeg sin congelar la ventana (RF-13c).
+
+    El trabajo corre en otro hilo y NUNCA toca la ventana: solo deja mensajes
+    en una cola. La ventana revisa la cola cada 100 ms y actualiza el botón,
+    la barra de progreso y el texto (tkinter solo se puede usar desde el hilo
+    principal).
+    """
+
+    def __init__(self, ventana, boton, barra, etiqueta, texto_trabajando: str):
+        self._ventana = ventana
+        self._boton = boton
+        self._barra = barra
+        self._etiqueta = etiqueta
+        self._texto_trabajando = texto_trabajando
+        self._texto_boton = ""
+        self._cola: queue.Queue = queue.Queue()
+        self._con_avance = False
+        self._al_terminar = None
+        self.ocupada = False
+
+    def iniciar(self, trabajo, al_terminar, boton=None) -> None:
+        """trabajo(al_progresar) hace el proceso y devuelve un resultado.
+
+        al_terminar(resultado) devuelve el mensaje de éxito para mostrar.
+        boton: botón que se desactiva mientras tanto (por defecto el principal).
+        """
+        self.ocupada = True
+        self._al_terminar = al_terminar
+        self._boton_activo = boton or self._boton
+        self._texto_boton = self._boton_activo.cget("text")
+        self._boton_activo.configure(state="disabled", text="Trabajando…")
+        self._etiqueta.configure(text=self._texto_trabajando)
+        self._barra.configure(mode="indeterminate")
+        self._barra.start()
+        self._con_avance = False
+
+        def en_otro_hilo():
+            try:
+                resultado = trabajo(lambda avance: self._cola.put(("avance", avance)))
+                self._cola.put(("listo", resultado))
+            except (ErrorUnion, ErrorAudio, OSError) as error:
+                self._cola.put(("error", str(error)))
+            except Exception as error:  # noqa: BLE001
+                # Cualquier otro error: avisar igual, para que la ventana no
+                # quede trabada en "Trabajando…" (y se pueda cerrar).
+                self._cola.put(("error", f"Error inesperado: {type(error).__name__}: {error}"))
+
+        threading.Thread(target=en_otro_hilo, daemon=True).start()
+        self._ventana.after(100, self._revisar)
+
+    def _revisar(self) -> None:
+        terminado = False
+        try:
+            while True:
+                tipo, dato = self._cola.get_nowait()
+                if tipo == "avance":
+                    if not self._con_avance:  # Pasar de "animada" a porcentaje
+                        self._barra.stop()
+                        self._barra.configure(mode="determinate")
+                        self._con_avance = True
+                    self._barra.set(dato)
+                    self._etiqueta.configure(text=f"{self._texto_trabajando} {dato:.0%}")
+                elif tipo == "listo":
+                    try:
+                        mensaje = self._al_terminar(dato)
+                    except Exception as error:  # noqa: BLE001 - la tarea sí terminó bien
+                        mensaje = f"✔ Terminado (aviso al mostrar el resultado: {error})"
+                    self._terminar(mensaje, avance=1)
+                    terminado = True
+                elif tipo == "error":
+                    self._terminar(f"⚠ {dato}", avance=0)
+                    terminado = True
+        except queue.Empty:
+            pass
+        if not terminado:
+            self._ventana.after(100, self._revisar)
+
+    def _terminar(self, mensaje: str, avance: float) -> None:
+        self.ocupada = False
+        self._barra.stop()
+        self._barra.configure(mode="determinate")
+        self._barra.set(avance)
+        self._boton_activo.configure(state="normal", text=self._texto_boton)
+        self._etiqueta.configure(text=mensaje)
+
+
 class VentanaPrincipal(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("SubtitulosMP4")
-        self.geometry("780x580")
-        self.minsize(660, 540)
+        self.geometry("800x660")
+        self.minsize(680, 620)
         self._arrastrar_disponible = self._cargar_arrastrar()
 
         # Subtítulo leído en la pestaña Sincronizar (para vista previa).
         self._sinc_lectura: LecturaSubtitulo | None = None
         self._sinc_ruta_leida = ""
 
-        # La unión corre en segundo plano; se comunica con la ventana por una cola.
-        self._uniendo = False
-        self._cola_union: queue.Queue = queue.Queue()
+        # Pistas de audio del video elegido en "Mejorar audio".
+        self._audio_pistas: list[PistaAudio] = []
+        self._audio_ruta_leida = ""
         self.protocol("WM_DELETE_WINDOW", self._al_cerrar)
 
         pestañas = ctk.CTkTabview(self)
@@ -184,11 +283,13 @@ class VentanaPrincipal(ctk.CTk):
         self._crear_pestaña_convertir(pestañas.add("Convertir"))
         self._crear_pestaña_sincronizar(pestañas.add("Sincronizar"))
         self._crear_pestaña_unir(pestañas.add("Unir al video"))
+        self._crear_pestaña_audio(pestañas.add("Mejorar audio"))
         self._crear_barra_estado()
 
         if self._arrastrar_disponible:
             for selector in (
-                self.conv_entrada, self.sinc_entrada, self.unir_video, self.unir_sub, self.unir_sub2
+                self.conv_entrada, self.sinc_entrada, self.unir_video, self.unir_sub,
+                self.unir_sub2, self.audio_video,
             ):
                 selector.activar_arrastrar()
 
@@ -528,6 +629,9 @@ class VentanaPrincipal(ctk.CTk):
             justify="left",
         )
         self.unir_resultado.pack(anchor="w")
+        self._tarea_unir = TareaEnSegundoPlano(
+            self, self.unir_boton, self.unir_barra, self.unir_resultado, "Uniendo…"
+        )
 
     def _crear_fila_pista(self, padre, texto: str, idioma: str):
         """Fila con selector de subtítulo + menú de idioma."""
@@ -542,7 +646,7 @@ class VentanaPrincipal(ctk.CTk):
 
     def _unir(self) -> None:
         """Valida lo elegido y lanza la unión en segundo plano."""
-        if self._uniendo:
+        if self._hay_tarea_activa(self.unir_resultado):
             return
         if not self.unir_video.ruta:
             self.unir_resultado.configure(text="⚠ Primero elige el video MP4.")
@@ -588,80 +692,235 @@ class VentanaPrincipal(ctk.CTk):
                 return
             por_defecto = selectores.index(objetivo)
 
-        # Preparar la ventana mientras FFmpeg trabaja.
-        self._uniendo = True
-        self.unir_boton.configure(state="disabled", text="Uniendo…")
-        self.unir_resultado.configure(text="Uniendo… esto suele tardar unos segundos.")
-        self.unir_barra.configure(mode="indeterminate")
-        self.unir_barra.start()
-        self._barra_con_avance = False
+        video, conservar = self.unir_video.ruta, bool(self.unir_conservar.get())
 
-        hilo = threading.Thread(
-            target=self._trabajo_union,
-            args=(self.unir_video.ruta, pistas, por_defecto, bool(self.unir_conservar.get()), bilingue),
-            daemon=True,
-        )
-        hilo.start()
-        self.after(100, self._revisar_cola_union)
-
-    def _trabajo_union(self, video, pistas, por_defecto, conservar, bilingue) -> None:
-        """Corre en segundo plano. NO toca la ventana: solo deja mensajes en la cola."""
-        try:
-            resultado = unir_subtitulos(
+        def trabajo(al_progresar):
+            return unir_subtitulos(
                 video, pistas, por_defecto, conservar,
-                al_progresar=lambda avance: self._cola_union.put(("avance", avance)),
-                incluir_bilingue=bilingue,
+                al_progresar=al_progresar, incluir_bilingue=bilingue,
             )
-            self._cola_union.put(("listo", resultado))
-        except (ErrorUnion, OSError) as error:
-            self._cola_union.put(("error", str(error)))
 
-    def _revisar_cola_union(self) -> None:
-        """Lee los mensajes del trabajo en segundo plano y actualiza la ventana."""
-        terminado = False
-        try:
-            while True:
-                tipo, dato = self._cola_union.get_nowait()
-                if tipo == "avance":
-                    if not self._barra_con_avance:  # Pasar de "animada" a porcentaje
-                        self.unir_barra.stop()
-                        self.unir_barra.configure(mode="determinate")
-                        self._barra_con_avance = True
-                    self.unir_barra.set(dato)
-                    self.unir_resultado.configure(text=f"Uniendo… {dato:.0%}")
-                elif tipo == "listo":
-                    self._terminar_union(
-                        f"✔ Listo: {dato.ruta_salida.name}\n"
-                        f"   Guardado junto al video, en: {dato.ruta_salida.parent}\n"
-                        f"   {dato.pistas_agregadas} pista(s) de subtítulos agregada(s). "
-                        "Ábrelo en VLC o MX Player y elige el subtítulo en el menú.",
-                        avance=1,
-                    )
-                    terminado = True
-                elif tipo == "error":
-                    self._terminar_union(f"⚠ {dato}", avance=0)
-                    terminado = True
-        except queue.Empty:
-            pass
-        if not terminado:
-            self.after(100, self._revisar_cola_union)
+        def al_terminar(resultado) -> str:
+            # Dejar el video listo en "Mejorar audio", si ese campo está vacío.
+            if not self.audio_video.ruta:
+                self.audio_video.poner_ruta(resultado.ruta_salida)
+            return (
+                f"✔ Listo: {resultado.ruta_salida.name}\n"
+                f"   Guardado junto al video, en: {resultado.ruta_salida.parent}\n"
+                f"   {resultado.pistas_agregadas} pista(s) de subtítulos agregada(s). "
+                "Ábrelo en VLC o MX Player y elige el subtítulo en el menú."
+            )
 
-    def _terminar_union(self, mensaje: str, avance: float) -> None:
-        self._uniendo = False
-        self.unir_barra.stop()
-        self.unir_barra.configure(mode="determinate")
-        self.unir_barra.set(avance)
-        self.unir_boton.configure(state="normal", text="Unir subtítulos al video")
-        self.unir_resultado.configure(text=mensaje)
+        self._tarea_unir.iniciar(trabajo, al_terminar)
+
+    def _hay_tarea_activa(self, etiqueta) -> bool:
+        """True (y avisa) si ya hay un proceso de FFmpeg trabajando.
+
+        Se hace uno a la vez: dos procesos sobre videos grandes al mismo
+        tiempo serían más lentos que uno tras otro.
+        """
+        if self._tarea_unir.ocupada or self._tarea_audio.ocupada:
+            etiqueta.configure(text="⚠ Espera a que termine el proceso que está en curso.")
+            return True
+        return False
 
     def _al_cerrar(self) -> None:
-        """No dejar cerrar la ventana a mitad de una unión (quedaría un archivo dañado)."""
-        if self._uniendo:
+        """No dejar cerrar la ventana a mitad de un proceso (quedaría un archivo dañado)."""
+        if self._tarea_unir.ocupada or self._tarea_audio.ocupada:
             messagebox.showwarning(
-                "Espera un momento", "Se están uniendo los subtítulos. Espera a que termine."
+                "Espera un momento", "Hay un video procesándose. Espera a que termine."
             )
             return
         self.destroy()
+
+    # ======================================================================
+    # Pestaña 4: Mejorar audio (fase 5)
+    # ======================================================================
+    def _crear_pestaña_audio(self, pestaña) -> None:
+        ctk.CTkLabel(
+            pestaña,
+            text="Voces más claras y efectos (explosiones, disparos) menos fuertes.",
+        ).pack(anchor="w", pady=(8, 6))
+        self.audio_video = SelectorArchivo(
+            pestaña, "Video MP4:", _TIPOS_VIDEO, al_elegir=self._analizar_audio
+        )
+        self.audio_video.pack(fill="x", pady=4)
+
+        fila_pista = ctk.CTkFrame(pestaña, fg_color="transparent")
+        fila_pista.pack(fill="x", pady=4)
+        ctk.CTkLabel(fila_pista, text="Pista de audio:", width=110, anchor="w").pack(side="left")
+        self.audio_pista = ctk.CTkOptionMenu(
+            fila_pista, values=["Primero elige un video"], command=self._mostrar_metodo_audio
+        )
+        self.audio_pista.configure(state="disabled")
+        self.audio_pista.pack(side="left", fill="x", expand=True, padx=8)
+        self.audio_info = ctk.CTkLabel(pestaña, text="", justify="left", text_color="gray")
+        self.audio_info.pack(anchor="w")
+
+        fila_nivel = ctk.CTkFrame(pestaña, fg_color="transparent")
+        fila_nivel.pack(fill="x", pady=(8, 2))
+        ctk.CTkLabel(fila_nivel, text="Intensidad:", width=110, anchor="w").pack(side="left")
+        self.audio_nivel = ctk.CTkSegmentedButton(
+            fila_nivel, values=list(NIVELES), command=self._mostrar_ayuda_nivel
+        )
+        self.audio_nivel.set("Media")
+        self.audio_nivel.pack(side="left", padx=8)
+        self.audio_ayuda_nivel = ctk.CTkLabel(
+            pestaña, text=_AYUDA_NIVELES["Media"], text_color="gray"
+        )
+        self.audio_ayuda_nivel.pack(anchor="w")
+
+        self.audio_conservar = ctk.CTkCheckBox(
+            pestaña, text="Conservar también el audio original (para cambiar entre ambos en VLC)"
+        )
+        self.audio_conservar.select()
+        self.audio_conservar.pack(anchor="w", pady=6)
+
+        # Fragmento de prueba: escuchar antes de procesar toda la película.
+        fila_prueba = ctk.CTkFrame(pestaña, fg_color="transparent")
+        fila_prueba.pack(fill="x", pady=4)
+        ctk.CTkLabel(fila_prueba, text="Probar desde:", width=110, anchor="w").pack(side="left")
+        self.audio_inicio = ctk.CTkEntry(fila_prueba, width=110, placeholder_text="00:10:00")
+        self.audio_inicio.pack(side="left", padx=8)
+        self.audio_boton_prueba = ctk.CTkButton(
+            fila_prueba,
+            text=f"Probar {DURACION_PRUEBA // 60} minutos",
+            width=140,
+            command=self._probar_audio,
+        )
+        self.audio_boton_prueba.pack(side="left")
+        ctk.CTkLabel(
+            fila_prueba, text="  (elige una escena con diálogos y efectos)", text_color="gray"
+        ).pack(side="left")
+
+        self.audio_boton = ctk.CTkButton(
+            pestaña, text="Mejorar audio de todo el video", command=self._mejorar_audio
+        )
+        self.audio_boton.pack(pady=8)
+        self.audio_barra = ctk.CTkProgressBar(pestaña)
+        self.audio_barra.set(0)
+        self.audio_barra.pack(fill="x", padx=4, pady=4)
+        self.audio_resultado = ctk.CTkLabel(
+            pestaña,
+            text="Se crea un video nuevo junto al original; el original no se toca.",
+            justify="left",
+        )
+        self.audio_resultado.pack(anchor="w")
+        self._tarea_audio = TareaEnSegundoPlano(
+            self, self.audio_boton, self.audio_barra, self.audio_resultado,
+            "Procesando el audio…",
+        )
+
+    def _analizar_audio(self, ruta: str) -> None:
+        """Lee las pistas de audio del video y llena el menú (RF-22)."""
+        self._audio_pistas = []
+        self._audio_ruta_leida = ""
+        self.audio_pista.configure(values=["Primero elige un video"], state="disabled")
+        self.audio_pista.set("Primero elige un video")
+        try:
+            pistas = analizar_audio(ruta)
+        except ErrorAudio as error:
+            self.audio_info.configure(text=f"⚠ {error}")
+            return
+
+        self._audio_pistas = pistas
+        self._audio_ruta_leida = ruta
+        descripciones = [pista.descripcion() for pista in pistas]
+        self.audio_pista.configure(values=descripciones, state="normal")
+        elegida = descripciones[elegir_pista(pistas)]
+        self.audio_pista.set(elegida)
+        self._mostrar_metodo_audio(elegida)
+
+    def _pista_elegida(self) -> PistaAudio | None:
+        descripciones = [pista.descripcion() for pista in self._audio_pistas]
+        actual = self.audio_pista.get()
+        if actual not in descripciones:
+            return None
+        return self._audio_pistas[descripciones.index(actual)]
+
+    def _mostrar_metodo_audio(self, _valor=None) -> None:
+        """Explica qué se le va a hacer a la pista elegida."""
+        pista = self._pista_elegida()
+        if pista is None:
+            return
+        if pista.es_envolvente:
+            texto = (f"Audio {pista.distribucion}: se subirá el canal central (donde van las voces) "
+                     "y se bajarán los demás.")
+        elif pista.canales == 2:
+            texto = "Audio estéreo: se reducirán los sonidos de los lados y se nivelará el volumen."
+            if any(otra.es_envolvente for otra in self._audio_pistas):
+                texto += "\nEste video también tiene una pista 5.1: si es del mismo idioma, elígela."
+        else:
+            texto = "Se nivelará el volumen."
+        if pista.ya_mejorada:
+            texto += "\nOjo: esta pista ya fue mejorada antes. Mejor elige la original."
+        self.audio_info.configure(text=texto)
+
+    def _mostrar_ayuda_nivel(self, nivel: str) -> None:
+        self.audio_ayuda_nivel.configure(text=_AYUDA_NIVELES[nivel])
+
+    def _datos_audio(self):
+        """Valida lo elegido. Devuelve (video, número de pista, nivel) o None."""
+        if self._hay_tarea_activa(self.audio_resultado):
+            return None
+        video = self.audio_video.ruta
+        if not video:
+            self.audio_resultado.configure(text="⚠ Primero elige el video MP4.")
+            return None
+        if video != self._audio_ruta_leida:
+            self._analizar_audio(video)  # La ruta se escribió a mano
+        pista = self._pista_elegida()
+        if pista is None:
+            # Mostrar la causa real (no existe, está dañado, no tiene audio…).
+            causa = self.audio_info.cget("text") or "⚠ No se encontró audio en ese video."
+            self.audio_resultado.configure(text=causa)
+            return None
+        return video, pista.numero, self.audio_nivel.get()
+
+    def _probar_audio(self) -> None:
+        """Procesa solo 2 minutos para escuchar el resultado antes (RF-26)."""
+        datos = self._datos_audio()
+        if datos is None:
+            return
+        video, numero, nivel = datos
+        inicio = self.audio_inicio.get().strip() or "00:10:00"
+
+        def trabajo(al_progresar):
+            return probar_fragmento(video, inicio, nivel, numero, al_progresar)
+
+        def al_terminar(resultado) -> str:
+            return (
+                f"✔ Prueba lista: {resultado.ruta_salida.name}\n"
+                f"   En: {resultado.ruta_salida.parent}\n"
+                "   Ábrela en VLC. En Audio → Pista de audio compara la mejorada con la original."
+            )
+
+        self._tarea_audio.iniciar(trabajo, al_terminar, boton=self.audio_boton_prueba)
+
+    def _mejorar_audio(self) -> None:
+        """Procesa el audio de todo el video (RF-21)."""
+        datos = self._datos_audio()
+        if datos is None:
+            return
+        video, numero, nivel = datos
+        conservar = bool(self.audio_conservar.get())
+
+        def trabajo(al_progresar):
+            return mejorar_audio(video, nivel, numero, conservar, al_progresar)
+
+        def al_terminar(resultado) -> str:
+            # Dejar el video listo en "Unir al video", si ese campo está vacío.
+            if not self.unir_video.ruta:
+                self.unir_video.poner_ruta(resultado.ruta_salida)
+            originales = (" La pista original sigue disponible en Audio → Pista de audio."
+                          if resultado.conservo_originales else "")
+            return (
+                f"✔ Listo: {resultado.ruta_salida.name}\n"
+                f"   Guardado junto al video, en: {resultado.ruta_salida.parent}\n"
+                f"   {resultado.metodo}.{originales}"
+            )
+
+        self._tarea_audio.iniciar(trabajo, al_terminar)
 
     # ======================================================================
     # Barra inferior: estado de FFmpeg (RF-16)
@@ -670,7 +929,7 @@ class VentanaPrincipal(ctk.CTk):
         if buscar_ffmpeg():
             texto, color = "✔ FFmpeg encontrado", "green"
         else:
-            texto = "✖ FFmpeg no está instalado (necesario para unir al video). Ver README."
+            texto = "✖ FFmpeg no está instalado (necesario para unir al video y mejorar el audio). Ver README."
             color = "orange"
         ctk.CTkLabel(self, text=texto, text_color=color).pack(anchor="w", padx=16, pady=8)
 

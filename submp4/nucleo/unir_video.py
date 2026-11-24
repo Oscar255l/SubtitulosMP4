@@ -10,19 +10,11 @@ Cómo funciona:
        formato de subtítulos que entiende el MP4.
     3. El resultado se guarda en un archivo NUEVO: el original no se toca.
 
-SEGURIDAD (RNF-03):
-    - FFmpeg se ejecuta con subprocess pasando una LISTA de argumentos y sin
-      shell=True: un nombre de archivo como 'pelicula"; del *.mp4' nunca se
-      interpreta como un comando.
-    - Las rutas se pasan absolutas y con el prefijo "file:", para que FFmpeg
-      no confunda un archivo llamado "-y.mp4" con una opción, ni uno llamado
-      "http:algo" con una dirección de internet.
-    - Se usa "-n": FFmpeg nunca sobrescribe un archivo existente.
+SEGURIDAD (RNF-03): FFmpeg se ejecuta con las protecciones del módulo
+ffmpeg.py (lista de argumentos sin shell, rutas con "file:" y "-n").
 """
 
 import re
-import shutil
-import subprocess  # nosec B404 - se usa de forma segura (ver arriba)
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -30,22 +22,15 @@ from pathlib import Path
 
 from submp4.nucleo.bilingue import combinar_bilingue
 from submp4.nucleo.conversion import ErrorConversion, guardar_srt, leer_lineas
+from submp4.nucleo.ffmpeg import (
+    ErrorFFmpeg,
+    buscar_ffmpeg,
+    como_archivo,
+    duracion_video,
+    ejecutar_ffmpeg,
+)
+from submp4.nucleo.idiomas import nombre_de_idioma
 from submp4.nucleo.rutas import ruta_sin_conflicto
-
-# Nombre visible -> código de idioma ISO 639-2 que guarda el MP4.
-IDIOMAS = {
-    "Inglés": "eng",
-    "Español": "spa",
-    "Portugués": "por",
-    "Francés": "fre",
-    "Italiano": "ita",
-    "Alemán": "ger",
-    "Japonés": "jpn",
-    "Sin especificar": "und",
-}
-
-# En Windows, evita que se abra una ventana negra de consola al llamar a FFmpeg.
-_SIN_VENTANA = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 class ErrorUnion(Exception):
@@ -69,11 +54,6 @@ class ResultadoUnion:
     pistas_agregadas: int
 
 
-def buscar_ffmpeg() -> str | None:
-    """Devuelve la ruta de FFmpeg si está instalado, o None si no (RF-16)."""
-    return shutil.which("ffmpeg")
-
-
 def ruta_salida_disponible(ruta_video: Path) -> Path:
     """Calcula dónde guardar el video con subtítulos sin pisar nada (RF-12).
 
@@ -84,18 +64,6 @@ def ruta_salida_disponible(ruta_video: Path) -> Path:
     return ruta_sin_conflicto(
         ruta_video.with_name(f"{ruta_video.stem}.subs{ruta_video.suffix}")
     )
-
-
-def _nombre_de_idioma(codigo: str) -> str:
-    for nombre, valor in IDIOMAS.items():
-        if valor == codigo:
-            return nombre
-    return codigo
-
-
-def _como_archivo(ruta: Path) -> str:
-    """Ruta absoluta con prefijo "file:" (ver SEGURIDAD arriba)."""
-    return f"file:{Path(ruta).resolve()}"
 
 
 # ---------------------------------------------------------------------------
@@ -121,9 +89,9 @@ def construir_comando(
     pista de subtítulos k del archivo de salida.
     """
     comando = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-n"]
-    comando += ["-i", _como_archivo(ruta_video)]
+    comando += ["-i", como_archivo(ruta_video)]
     for ruta_srt, _, _ in subtitulos:
-        comando += ["-i", _como_archivo(ruta_srt)]
+        comando += ["-i", como_archivo(ruta_srt)]
 
     # Qué pistas van a la salida: video, audio, subtítulos nuevos y existentes.
     # El "?" significa "si existe", para que no falle si el video no tiene audio.
@@ -147,52 +115,12 @@ def construir_comando(
 
     # Progreso en formato clave=valor por la salida estándar.
     comando += ["-progress", "pipe:1", "-nostats"]
-    comando.append(_como_archivo(ruta_salida))
+    comando.append(como_archivo(ruta_salida))
     return comando
 
 
 # ---------------------------------------------------------------------------
-# 2. Progreso (RF-13)
-# ---------------------------------------------------------------------------
-
-
-def duracion_video(ruta_video: Path) -> float | None:
-    """Duración del video en segundos usando ffprobe, o None si no se puede."""
-    ffprobe = shutil.which("ffprobe")
-    if not ffprobe:
-        return None
-    try:
-        salida = subprocess.run(  # nosec B603 - lista de argumentos, sin shell
-            [ffprobe, "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=nw=1:nk=1", _como_archivo(ruta_video)],
-            capture_output=True, text=True, encoding="utf-8", timeout=30, check=False,
-            creationflags=_SIN_VENTANA,
-        )
-        return float(salida.stdout.strip())
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        return None
-
-
-_TIEMPO_PROCESADO = re.compile(r"^out_time_(?:us|ms)=(\d+)$")
-
-
-def fraccion_de_progreso(linea: str, duracion: float | None) -> float | None:
-    """Lee una línea de "-progress" y devuelve el avance entre 0 y 1.
-
-    Devuelve None si la línea no dice nada del avance.
-    """
-    linea = linea.strip()
-    if linea == "progress=end":
-        return 1.0
-    coincidencia = _TIEMPO_PROCESADO.match(linea)
-    if not coincidencia or not duracion:
-        return None
-    segundos = int(coincidencia.group(1)) / 1_000_000  # Viene en microsegundos
-    return max(0.0, min(1.0, segundos / duracion))
-
-
-# ---------------------------------------------------------------------------
-# 3. Función principal
+# 2. Función principal
 # ---------------------------------------------------------------------------
 
 
@@ -258,7 +186,7 @@ def unir_subtitulos(
             lecturas.append(lectura)
             temporal = carpeta / f"pista_{indice}.srt"
             guardar_srt(lectura.lineas, temporal, pista.ruta)
-            nombre = pista.nombre or _nombre_de_idioma(pista.idioma)
+            nombre = pista.nombre or nombre_de_idioma(pista.idioma)
             preparados.append((temporal, pista.idioma, nombre))
 
         # Paso 1b (opcional): pista bilingüe, primera arriba y segunda en cursiva.
@@ -276,37 +204,17 @@ def unir_subtitulos(
         comando = construir_comando(
             ffmpeg, ruta_video, preparados, salida, por_defecto, conservar_existentes
         )
-        duracion = duracion_video(ruta_video)
-        registro_errores = carpeta / "errores.txt"
-
-        with registro_errores.open("w", encoding="utf-8") as errores:
-            proceso = subprocess.Popen(  # nosec B603 - lista de argumentos, sin shell
-                comando,
-                stdout=subprocess.PIPE,
-                stderr=errores,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                creationflags=_SIN_VENTANA,
-            )
-            for linea in proceso.stdout:
-                fraccion = fraccion_de_progreso(linea, duracion)
-                if fraccion is not None and al_progresar:
-                    al_progresar(fraccion)
-            codigo = proceso.wait()
-
-        if codigo != 0:
-            # Borrar el archivo a medio hacer (es nuestro, no el original).
-            if salida.exists():
-                salida.unlink()
-            detalle = registro_errores.read_text(encoding="utf-8", errors="replace")
-            ultimas = "\n".join(detalle.strip().splitlines()[-4:]) or "(sin detalle)"
+        try:
+            ejecutar_ffmpeg(comando, salida, duracion_video(ruta_video), al_progresar)
+        except ErrorFFmpeg as error:
             consejo = (
                 "\nSi el video ya traía subtítulos de imagen, prueba desmarcando "
                 "«Conservar los subtítulos que ya trae el video»."
                 if conservar_existentes
                 else ""
             )
-            raise ErrorUnion(f"FFmpeg no pudo unir los subtítulos:\n{ultimas}{consejo}")
+            raise ErrorUnion(
+                f"FFmpeg no pudo unir los subtítulos:\n{error.detalle}{consejo}"
+            ) from None
 
     return ResultadoUnion(ruta_salida=salida, pistas_agregadas=len(preparados))

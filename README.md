@@ -12,6 +12,9 @@ Aplicación de escritorio para preparar subtítulos de series y películas en MP
   reproductor, sin recodificar el video.
 - 🌎 **Pista bilingüe:** inglés arriba y español en cursiva debajo, ideal para
   practicar inglés.
+- 🔊 **Mejora el audio:** voces más claras y explosiones menos fuertes, para no
+  tener que subir y bajar el volumen a cada rato. Con audio 5.1 realza el canal
+  central, donde van los diálogos.
 - 🖱️ **Arrastrar y soltar** archivos sobre la ventana.
 
 > Proyecto personal en desarrollo. Ver el avance en [REQUISITOS.md](REQUISITOS.md).
@@ -20,7 +23,7 @@ Aplicación de escritorio para preparar subtítulos de series y películas en MP
 
 - Windows 10/11
 - [Python 3.11 o superior](https://www.python.org/downloads/) (marca *"Add Python to PATH"* al instalar)
-- [FFmpeg](https://ffmpeg.org/) (solo para unir subtítulos al video)
+- [FFmpeg](https://ffmpeg.org/) (para unir subtítulos al video y mejorar el audio)
 
 ### Instalar FFmpeg
 
@@ -63,6 +66,11 @@ Flujo típico:
    subtítulo desde el menú. Si marcas la pista bilingüe, también tendrás una
    pista «Inglés + Español» con ambos idiomas a la vez.
 
+4. **Mejorar audio:** eliges el MP4 y la intensidad (*Suave*, *Media* o
+   *Fuerte*). Con **Probar 2 minutos** escuchas el resultado en una escena antes
+   de procesar toda la película. Se crea `Serie.audio.mp4` con la pista
+   mejorada activa y la original disponible en VLC (*Audio → Pista de audio*).
+
 Ningún paso modifica los archivos originales.
 
 ## Estructura del proyecto
@@ -78,7 +86,10 @@ SubtitulosMP4/
 │   │   ├── conversion.py    # Pasar cualquier formato a SRT
 │   │   ├── sincronizacion.py# Desplazar y ajustar tiempos
 │   │   ├── bilingue.py      # Combinar inglés + español en una pista
-│   │   └── unir_video.py    # Llamar a FFmpeg para unir al MP4
+│   │   ├── unir_video.py    # Unir subtítulos al MP4
+│   │   ├── audio.py         # Mejorar el audio: voces claras, efectos controlados
+│   │   ├── ffmpeg.py        # Ejecutar FFmpeg/ffprobe de forma segura
+│   │   └── idiomas.py       # Nombres y códigos de idioma
 │   └── interfaz/
 │       └── ventana.py       # Ventana con CustomTkinter
 ├── tests/                   # Pruebas automáticas con pytest
